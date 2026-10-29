@@ -112,6 +112,52 @@ def verify_ledger() -> dict:
             "problems": problems}
 
 
+def _latest_diagnosis(kind: str) -> dict:
+    service = get_service()
+    artefact = service.store.latest_artefact(kind)
+    if artefact is None:
+        raise HTTPException(status_code=404, detail="no diagnosis run yet")
+    return artefact.model_dump()
+
+
+def _verify_diagnosis(kind: str) -> dict:
+    service = get_service()
+    artefact = service.store.latest_artefact(kind)
+    if artefact is None:
+        raise HTTPException(status_code=404, detail="no diagnosis run yet")
+    problems = service.diagnosis.verify(artefact)
+    return {"artefact_id": artefact.artefact_id, "verified": not problems,
+            "problems": problems}
+
+
+@app.get("/diagnosis/stockout")
+def latest_stockout() -> dict:
+    return _latest_diagnosis("diagnosis_stockout")
+
+
+@app.get("/diagnosis/stockout/verify")
+def verify_stockout() -> dict:
+    return _verify_diagnosis("diagnosis_stockout")
+
+
+@app.get("/diagnosis/ad-decay")
+def latest_ad_decay() -> dict:
+    return _latest_diagnosis("diagnosis_ad_decay")
+
+
+@app.get("/diagnosis/ad-decay/verify")
+def verify_ad_decay() -> dict:
+    return _verify_diagnosis("diagnosis_ad_decay")
+
+
+@app.get("/diagnosis/refusals")
+def list_refusals() -> dict:
+    service = get_service()
+    refusals = service.store.list_artefacts("diagnosis_refusal")
+    return {"count": len(refusals),
+            "refusals": [r.model_dump() for r in refusals]}
+
+
 @app.get("/model-calls")
 def list_model_calls(run_id: str | None = None) -> dict:
     service = get_service()

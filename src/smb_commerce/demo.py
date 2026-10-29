@@ -72,6 +72,32 @@ def main() -> int:
             print(f"             week 1 ROAS {first['roas']} ->"
                   f" week {len(row['weekly'])} ROAS {last['roas']}")
 
+        print("\n== Diagnosis packs I — findings from the ledger ==")
+        stockout = service.diagnose_stockout()
+        sp = stockout.payload
+        print(f"  stockout {stockout.artefact_id}  pack {sp['pack_version']}"
+              f"  verified {not service.diagnosis.verify(stockout)}")
+        for finding in sp["findings"]:
+            print(f"  STOCKOUT {finding['sku']} {finding['name']}"
+                  f"  on hand {finding['on_hand']}"
+                  f"  cover {finding['cover_days']} days"
+                  f"  out {finding['cover_out_date']}"
+                  f"  velocity {finding['trailing_velocity_per_day']}/day")
+        for entry in sp["no_data"]:
+            print(f"  NO-DATA {entry['sku']} {entry['reason']}")
+        decay = service.diagnose_ad_decay()
+        dp = decay.payload
+        print(f"  ad decay {decay.artefact_id}  pack {dp['pack_version']}"
+              f"  verified {not service.diagnosis.verify(decay)}")
+        for finding in dp["findings"]:
+            print(f"  DECAY {finding['ad_set']}"
+                  f"  ROAS {finding['first_week_roas']}"
+                  f" ({finding['first_week']}) ->"
+                  f" {finding['latest_week_roas']} ({finding['latest_week']})"
+                  f"  factor {finding['decay_factor']}")
+        for entry in dp["unjudged"]:
+            print(f"  UNJUDGED {entry['ad_set']} {entry['reason']}")
+
         print("\n== Expense facts — PackShip Co at $349.00 ==")
         for fact in service.store.list_facts("expense"):
             if fact.payload["vendor"] == generator.DUPLICATE_VENDOR:
