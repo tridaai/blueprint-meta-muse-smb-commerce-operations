@@ -90,9 +90,20 @@ Every surface — API, CLI, demo, graph — talks to one
 - **Graph** (`graph.py`): a LangGraph `StateGraph` whose nodes pass
   counts and artefact ids, never figures. Round 2 inserted the
   diagnose node between compute and verify; Round 4 extended it to
-  run all five diagnoses, the email-flow audit included; later
-  rounds insert nodes between `verify` and `END` without changing
-  the spine.
+  run all five diagnoses, the email-flow audit included; Round 5
+  inserted the plan node between diagnose and verify, and the
+  verify node re-performs the plan alongside the ledger and the
+  finding sets; later rounds insert nodes between `verify` and
+  `END` without changing the spine.
+- **Plan** (`plan.py`): the growth plan assembler and its verifier.
+  The plan pack states the family order, the per-family exposure
+  fields and the summary figure list as data; the assembler copies
+  figures from the head ledger with citations, ranks findings by
+  the pack rule, and references findings and draft proposals by id
+  in its actions. The verifier re-resolves every figure and
+  citation and re-derives the ranking by a second route; the
+  assembly gate applies the same checks plus head currency, and a
+  failure records a plan refusal artefact instead of a plan.
 
 ## Data model
 
