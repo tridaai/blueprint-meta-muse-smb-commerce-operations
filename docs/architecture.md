@@ -50,11 +50,17 @@ Every surface — API, CLI, demo, graph — talks to one
   disagreement, not a formatting one. The artefact id is a hash of the
   payload plus the fingerprint of the fact set, so the same facts
   always produce the same artefact and different facts never do.
-- **Diagnosis** (`diagnosis.py`): packs I and II — stockout risk,
-  ad decay, expense anomalies and refund anomalies — with the rules
-  held as data in versioned packs. The current pack is `2026.10.2`;
-  `2026.10.1` is kept verbatim in the registry, and verification
+- **Diagnosis** (`diagnosis.py`): packs I, II and III — stockout
+  risk, ad decay, expense anomalies, refund anomalies and the
+  email-flow audit — with the rules held as data in versioned
+  packs. The current pack is `2026.10.3`; `2026.10.1` and
+  `2026.10.2` are kept verbatim in the registry, and verification
   re-performs a finding set under the version it was stamped with.
+  The audit grades the defined email flows against the pack's
+  stated catalogue and emits, for each missing or dormant flow, a
+  draft flow proposal artefact — structure only, marked as a
+  proposal that changes nothing; the audit itself writes artefacts
+  only and never touches a flow fact.
   Expense findings name the fact ids they rest on (a duplicate names
   both charges); refund findings restate the ledger's per-SKU
   figures they were judged from. Route 1
@@ -83,8 +89,10 @@ Every surface — API, CLI, demo, graph — talks to one
   report packs use it from Round 17.
 - **Graph** (`graph.py`): a LangGraph `StateGraph` whose nodes pass
   counts and artefact ids, never figures. Round 2 inserted the
-  diagnose node between compute and verify; later rounds insert
-  nodes between `verify` and `END` without changing the spine.
+  diagnose node between compute and verify; Round 4 extended it to
+  run all five diagnoses, the email-flow audit included; later
+  rounds insert nodes between `verify` and `END` without changing
+  the spine.
 
 ## Data model
 
