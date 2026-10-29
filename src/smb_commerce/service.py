@@ -65,6 +65,12 @@ class CommerceService:
     def diagnose_ad_decay(self):
         return self.diagnosis.diagnose_ad_decay()
 
+    def diagnose_expenses(self):
+        return self.diagnosis.diagnose_expenses()
+
+    def diagnose_refunds(self):
+        return self.diagnosis.diagnose_refunds()
+
     # -- model -------------------------------------------------------------
     def draft(self, run_id: str, system: str, prompt: str):
         return self.model.complete(run_id, system, prompt)

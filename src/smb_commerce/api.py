@@ -150,6 +150,26 @@ def verify_ad_decay() -> dict:
     return _verify_diagnosis("diagnosis_ad_decay")
 
 
+@app.get("/diagnosis/expense-anomalies")
+def latest_expense_anomalies() -> dict:
+    return _latest_diagnosis("diagnosis_expense_anomaly")
+
+
+@app.get("/diagnosis/expense-anomalies/verify")
+def verify_expense_anomalies() -> dict:
+    return _verify_diagnosis("diagnosis_expense_anomaly")
+
+
+@app.get("/diagnosis/refund-anomalies")
+def latest_refund_anomalies() -> dict:
+    return _latest_diagnosis("diagnosis_refund_anomaly")
+
+
+@app.get("/diagnosis/refund-anomalies/verify")
+def verify_refund_anomalies() -> dict:
+    return _verify_diagnosis("diagnosis_refund_anomaly")
+
+
 @app.get("/diagnosis/refusals")
 def list_refusals() -> dict:
     service = get_service()

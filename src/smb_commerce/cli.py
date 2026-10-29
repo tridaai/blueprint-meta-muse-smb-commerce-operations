@@ -1,9 +1,11 @@
 """The CLI surface over the same service the API serves.
 
 Commands: generate, facts, ledger, verify, diagnose,
-diagnose-verify, refusals, model-calls. Output is plain text sized
-for a terminal; figures come from the ledger artefact, never
-recomputed on the fly by the CLI itself.
+diagnose-verify, refusals, model-calls. The diagnose commands cover
+all four packs (stockout, ad decay, expense anomalies, refund
+anomalies). Output is plain text sized for a terminal; figures come
+from the ledger artefact, never recomputed on the fly by the CLI
+itself.
 """
 
 from __future__ import annotations
@@ -49,17 +51,48 @@ def _print_diagnosis(artefact) -> None:
                   f"  out {finding['cover_out_date']}"
                   f"  velocity {finding['trailing_velocity_per_day']}/day"
                   f" over {finding['velocity_window_days']}d")
-        else:
+        elif p["diagnosis"] == "ad_decay":
             print(f"  DECAY {finding['ad_set']}"
                   f"  ROAS {finding['first_week_roas']}"
                   f" ({finding['first_week']}) ->"
                   f" {finding['latest_week_roas']} ({finding['latest_week']})"
                   f"  factor {finding['decay_factor']}")
+        elif finding["class"] == "duplicate_charge":
+            print(f"  DUPLICATE {finding['vendor']} {finding['amount']}"
+                  f" on {finding['dates'][0]} + {finding['dates'][1]}"
+                  f"  gap {finding['gap_days']}d"
+                  f" within {finding['window_days']}d"
+                  f"  facts {finding['fact_ids'][0]}, {finding['fact_ids'][1]}")
+        elif finding["class"] == "amount_outlier":
+            print(f"  OUTLIER {finding['vendor']} {finding['amount']}"
+                  f" on {finding['date']} ({finding['fact_id']})"
+                  f"  median {finding['vendor_median']}"
+                  f" x{finding['multiple']}"
+                  f" over {finding['charges']} charges")
+        else:  # refund_anomaly
+            print(f"  REFUND {finding['sku']} {finding['name']}"
+                  f"  rate {finding['refund_rate']}"
+                  f" over bar {finding['max_refund_rate']}"
+                  f"  refunds {finding['refunds']}"
+                  f" of gross {finding['gross_revenue']}"
+                  f"  units {finding['units_sold']}")
+    for entry in p.get("informational", []):
+        print(f"  NEW-VENDOR {entry['vendor']}"
+              f" first charge {entry['amount']} on {entry['date']}"
+              f" ({entry['fact_id']})"
+              f"  over threshold {entry['threshold']}")
     for entry in p.get("no_data", []):
         print(f"  NO-DATA {entry['sku']} {entry['reason']}")
     for entry in p.get("unjudged", []):
-        print(f"  UNJUDGED {entry['ad_set']} {entry['reason']}"
-              f"  spend {entry['total_spend']}  weeks {entry['weeks']}")
+        if "ad_set" in entry:
+            print(f"  UNJUDGED {entry['ad_set']} {entry['reason']}"
+                  f"  spend {entry['total_spend']}  weeks {entry['weeks']}")
+        elif "vendor" in entry:
+            print(f"  UNJUDGED {entry['vendor']} {entry['reason']}"
+                  f"  charges {entry['charges']}")
+        else:
+            print(f"  UNJUDGED {entry['sku']} {entry['reason']}"
+                  f"  units {entry['units_sold']}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -98,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _print_diagnosis(service.diagnose_stockout())
             _print_diagnosis(service.diagnose_ad_decay())
+            _print_diagnosis(service.diagnose_expenses())
+            _print_diagnosis(service.diagnose_refunds())
         except DiagnosisRefused as refused:
             print(f"REFUSED {refused.refusal.artefact_id}"
                   f" {refused.refusal.payload['diagnosis']}:"
@@ -106,7 +141,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "diagnose-verify":
         status = 0
-        for kind in ("diagnosis_stockout", "diagnosis_ad_decay"):
+        for kind in ("diagnosis_stockout", "diagnosis_ad_decay",
+                     "diagnosis_expense_anomaly", "diagnosis_refund_anomaly"):
             artefact = service.store.latest_artefact(kind)
             if artefact is None:
                 print(json.dumps({"kind": kind, "verified": False,
