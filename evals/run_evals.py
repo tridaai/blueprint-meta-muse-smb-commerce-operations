@@ -54,6 +54,22 @@ Zero-tolerance counters:
                                    a pack II verifier problem, or a
                                    planted pack II figure that does
                                    not match the hand-computed values
+  - email_missing_false_positives  a flow named missing that the
+                                   truth (dataset or fixture) defines
+  - email_missing_false_negatives  the planted missing flow (winback
+                                   on the dataset) not named missing
+  - email_dormant_false_positives  a flow named dormant that the
+                                   truth does not show as not active
+  - email_dormant_false_negatives  the fixture's paused flow not
+                                   named dormant
+  - draft_proposal_mismatches      a draft flow proposal whose
+                                   structure differs from the pack
+                                   catalogue's stated shape for that
+                                   flow, or a proposal verifier
+                                   problem
+  - audit_reperformance_mismatches an email-audit verifier problem
+  - flow_definition_mutations      an email_flow fact whose stored
+                                   form changed across an audit run
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -61,6 +77,7 @@ Exit code 0 on PASS, 1 on FAIL.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 from datetime import date, timedelta
@@ -71,9 +88,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from smb_commerce import generator
 from smb_commerce.config import Settings, load_settings
+from smb_commerce.diagnosis import DIAGNOSIS_PACK
 from smb_commerce.ingest import IngestPort
 from smb_commerce.service import CommerceService
-from smb_commerce.store import SqlStore
+from smb_commerce.store import SqlStore, canonical_json
 
 
 def main() -> int:
@@ -90,6 +108,10 @@ def main() -> int:
         "outlier_false_positives", "outlier_false_negatives",
         "refund_anomaly_false_positives", "refund_anomaly_false_negatives",
         "anomaly_reperformance_mismatches",
+        "email_missing_false_positives", "email_missing_false_negatives",
+        "email_dormant_false_positives", "email_dormant_false_negatives",
+        "draft_proposal_mismatches", "audit_reperformance_mismatches",
+        "flow_definition_mutations",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -306,6 +328,97 @@ def main() -> int:
             fixture_outliers - expected_outliers)
         counters["outlier_false_negatives"] += len(
             expected_outliers - fixture_outliers)
+
+        # Email-flow audit (pack III): on the dataset the winback
+        # flow is the one missing finding, nothing is dormant, and
+        # the one draft proposal must restate the catalogue's stated
+        # shape for winback exactly — trigger customer_lapsed, 2
+        # steps, delays 0 then 336 hours. The audit must leave the
+        # defined flows byte-identical.
+        def flow_fingerprint(svc) -> str:
+            material = canonical_json(
+                [f.model_dump() for f in svc.store.list_facts("email_flow")])
+            return hashlib.sha256(material.encode()).hexdigest()
+
+        def grade_audit(svc, audit, expected_missing, expected_dormant):
+            counters["audit_reperformance_mismatches"] += len(
+                svc.diagnosis.verify(audit))
+            missing_named = {f["flow_key"]
+                             for f in audit.payload["findings"]
+                             if f["class"] == "missing_flow"}
+            dormant_named = {f["flow_key"]
+                             for f in audit.payload["findings"]
+                             if f["class"] == "dormant_flow"}
+            counters["email_missing_false_positives"] += len(
+                missing_named - expected_missing)
+            counters["email_missing_false_negatives"] += len(
+                expected_missing - missing_named)
+            counters["email_dormant_false_positives"] += len(
+                dormant_named - expected_dormant)
+            counters["email_dormant_false_negatives"] += len(
+                expected_dormant - dormant_named)
+            catalogue = {e["flow_key"]: e for e in
+                         DIAGNOSIS_PACK["email_flow_audit"]["catalogue"]}
+            proposals = {p.payload["flow_key"]: p for p in
+                         svc.store.list_artefacts("draft_flow_proposal")}
+            expected_keys = expected_missing | expected_dormant
+            if set(proposals) != expected_keys:
+                counters["draft_proposal_mismatches"] += 1
+            for key in expected_keys & set(proposals):
+                entry = catalogue[key]
+                payload = proposals[key].payload
+                if not (payload["steps"] == entry["expected_steps"]
+                        and payload["step_delays_hours"]
+                        == entry["step_delays_hours"]
+                        and payload["trigger"] == entry["trigger"]
+                        and payload["status"] == "proposal"
+                        and payload["changes_nothing"] is True
+                        and payload["audit_artefact_id"]
+                        == audit.artefact_id):
+                    counters["draft_proposal_mismatches"] += 1
+                counters["draft_proposal_mismatches"] += len(
+                    svc.diagnosis.verify(proposals[key]))
+
+        flows_before = flow_fingerprint(service)
+        dataset_audit = service.audit_email_flows()
+        if flow_fingerprint(service) != flows_before:
+            counters["flow_definition_mutations"] += 1
+        grade_audit(service, dataset_audit, {generator.MISSING_FLOW}, set())
+
+        # Dormant grading needs a defined-but-paused flow, which the
+        # dataset deliberately lacks: a fixture store where
+        # post_purchase is defined with status paused, the other
+        # catalogue flows are active at their expected shapes, and
+        # winback is still absent.
+        audit_fixture_settings = Settings(
+            database_url="", sqlite_path=tmp_path / "audit-fixture.db",
+            migrations_dir=base.migrations_dir,
+            object_dir=tmp_path / "audit-fixture-objects",
+            s3_endpoint="", s3_bucket=base.s3_bucket,
+            model_profile="offline", model_tier="standard",
+            log_level="WARNING",
+        )
+        audit_fixture = CommerceService(audit_fixture_settings)
+        audit_fixture.ingest.ingest_many([
+            {"kind": "email_flow", "natural_key": f"flow:{key}",
+             "payload": {"flow_key": key, "name": name,
+                         "status": status, "steps": steps},
+             "source_system": generator.SOURCE_EMAIL, "as_of": "2026-01-04"}
+            for key, name, status, steps in (
+                ("welcome_series", "Welcome Series", "active", 3),
+                ("abandoned_cart", "Abandoned Cart", "active", 2),
+                ("post_purchase", "Post-Purchase", "paused", 2),
+                ("browse_abandonment", "Browse Abandonment", "active", 1),
+                ("replenishment", "Replenishment Reminder", "active", 1),
+            )
+        ])
+        audit_fixture.ledger.compute()
+        fixture_flows_before = flow_fingerprint(audit_fixture)
+        fixture_audit = audit_fixture.audit_email_flows()
+        if flow_fingerprint(audit_fixture) != fixture_flows_before:
+            counters["flow_definition_mutations"] += 1
+        grade_audit(audit_fixture, fixture_audit,
+                    {generator.MISSING_FLOW}, {"post_purchase"})
 
         # Cost ledger: an offline call and a stubbed hosted call, each
         # re-performed against the price table, each tier-stamped.

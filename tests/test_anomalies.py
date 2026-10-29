@@ -331,4 +331,4 @@ def test_cli_diagnose_covers_the_anomaly_packs(tmp_path, monkeypatch, capsys):
     assert "rate 0.050000" in out
     assert cli_main(["diagnose-verify"]) == 0
     verify_out = capsys.readouterr().out
-    assert verify_out.count('"verified": true') == 4
+    assert verify_out.count('"verified": true') == 5

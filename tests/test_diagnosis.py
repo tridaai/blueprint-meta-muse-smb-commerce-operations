@@ -20,7 +20,7 @@ from conftest import make_settings
 
 
 def test_pack_is_versioned_data_with_stated_thresholds():
-    assert DIAGNOSIS_PACK["version"] == "2026.10.2"
+    assert DIAGNOSIS_PACK["version"] == "2026.10.3"
     stockout = DIAGNOSIS_PACK["stockout"]
     assert stockout["velocity_window_days"] == 28
     assert stockout["max_cover_days"] == "24.00"
