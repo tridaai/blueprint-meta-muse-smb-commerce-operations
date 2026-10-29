@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from . import generator
+from .approvals import ApprovalService
 from .config import Settings, load_settings
 from .diagnosis import DiagnosisService
 from .drafting import DraftingService
@@ -42,6 +43,7 @@ class CommerceService:
         self.model: GovernedModelPort = build_model_port(self.settings, self.store)
         self.drafting = DraftingService(self.store, self.model)
         self.guardian = GuardianService(self.store, self.model)
+        self.approvals = ApprovalService(self.store, self.guardian)
         self.objects: ObjectStore = build_object_store(self.settings)
 
     # -- dataset ---------------------------------------------------------
@@ -113,3 +115,22 @@ class CommerceService:
 
     def blocked_drafts(self):
         return self.guardian.blocked_drafts()
+
+    # -- approval queue ------------------------------------------------------
+    def approve_draft(self, draft_id, approver):
+        return self.approvals.approve(draft_id, approver)
+
+    def reject_draft(self, draft_id, rejecter, reason_code, note=""):
+        return self.approvals.reject(draft_id, rejecter, reason_code, note)
+
+    def approval_queue(self):
+        return self.approvals.queue()
+
+    def approved_drafts(self):
+        return self.approvals.approved()
+
+    def rejected_drafts(self):
+        return self.approvals.rejected()
+
+    def approval_history(self, draft_id):
+        return self.approvals.history(draft_id)

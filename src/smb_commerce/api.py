@@ -13,7 +13,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
+from .approvals import APPROVAL_KIND, REJECTION_KIND, ApprovalRefused
 from .config import load_settings
 from .logging_config import configure_logging, new_request_id, request_id_var
 from .service import CommerceService
@@ -329,6 +331,115 @@ def blocked_drafts() -> dict:
     service = get_service()
     entries = service.blocked_drafts()
     return {"count": len(entries), "blocked": entries}
+
+
+class ApproveRequest(BaseModel):
+    draft_artefact_id: str
+    approver: str
+
+
+class RejectRequest(BaseModel):
+    draft_artefact_id: str
+    rejecter: str
+    reason_code: str
+    note: str = ""
+
+
+@app.get("/approvals/queue")
+def approval_queue() -> dict:
+    service = get_service()
+    queue = service.approval_queue()
+    return {
+        "awaiting_count": len(queue["awaiting_approval"]),
+        "approved_count": len(queue["approved"]),
+        "rejected_count": len(queue["rejected"]),
+        "queue": queue,
+    }
+
+
+@app.get("/approvals/awaiting")
+def approvals_awaiting() -> dict:
+    service = get_service()
+    entries = service.approvals.awaiting()
+    return {"count": len(entries), "awaiting_approval": entries}
+
+
+@app.get("/approvals/approved")
+def approvals_approved() -> dict:
+    service = get_service()
+    entries = service.approved_drafts()
+    return {"count": len(entries), "approved": entries}
+
+
+@app.get("/approvals/rejected")
+def approvals_rejected() -> dict:
+    service = get_service()
+    entries = service.rejected_drafts()
+    return {"count": len(entries), "rejected": entries}
+
+
+@app.get("/approvals/refusals")
+def approvals_refusals() -> dict:
+    service = get_service()
+    refusals = service.approvals.refusals()
+    return {"count": len(refusals),
+            "refusals": [r.model_dump() for r in refusals]}
+
+
+@app.get("/approvals/history/{draft_id}")
+def approval_history(draft_id: str) -> dict:
+    service = get_service()
+    entries = service.approval_history(draft_id)
+    return {"draft_artefact_id": draft_id, "count": len(entries),
+            "history": entries}
+
+
+@app.get("/approvals/acts/{act_id}")
+def approval_act(act_id: str) -> dict:
+    service = get_service()
+    act = service.store.get_artefact(act_id)
+    if act is None or act.kind not in (APPROVAL_KIND, REJECTION_KIND):
+        raise HTTPException(status_code=404, detail="approval act not found")
+    return act.model_dump()
+
+
+@app.get("/approvals/acts/{act_id}/verify")
+def verify_approval_act(act_id: str) -> dict:
+    service = get_service()
+    act = service.store.get_artefact(act_id)
+    if act is None or act.kind not in (APPROVAL_KIND, REJECTION_KIND):
+        raise HTTPException(status_code=404, detail="approval act not found")
+    problems = service.approvals.verify(act)
+    return {"artefact_id": act.artefact_id, "verified": not problems,
+            "problems": problems}
+
+
+@app.post("/approvals/approve")
+def approve_draft(body: ApproveRequest) -> dict:
+    service = get_service()
+    try:
+        act = service.approve_draft(body.draft_artefact_id, body.approver)
+    except ApprovalRefused as refused:
+        raise HTTPException(status_code=422, detail={
+            "refusal_artefact_id": refused.refusal.artefact_id,
+            "problems": refused.refusal.payload["problems"],
+        })
+    return act.model_dump()
+
+
+@app.post("/approvals/reject")
+def reject_draft(body: RejectRequest) -> dict:
+    service = get_service()
+    try:
+        act = service.reject_draft(
+            body.draft_artefact_id, body.rejecter, body.reason_code,
+            body.note)
+    except ApprovalRefused as refused:
+        raise HTTPException(status_code=422, detail={
+            "refusal_artefact_id": refused.refusal.artefact_id,
+            "problems": refused.refusal.payload["problems"],
+        })
+    return act.model_dump()
 
 
 @app.get("/model-calls")

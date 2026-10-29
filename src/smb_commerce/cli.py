@@ -23,6 +23,7 @@ import argparse
 import json
 import sys
 
+from .approvals import ACT_KINDS, ApprovalRefused
 from .diagnosis import DiagnosisRefused
 from .drafting import DRAFT_KINDS, DraftRefused
 from .plan import PlanRefused
@@ -183,6 +184,31 @@ def _print_verdict(verdict) -> None:
         print(f"  blocking: {', '.join(p['blocking_rules'])}")
 
 
+def _print_approval_queue(service: CommerceService) -> None:
+    queue = service.approval_queue()
+    for entry in queue["awaiting_approval"]:
+        print(f"AWAITING {entry['draft_kind']}"
+              f" {entry['draft_artefact_id']}"
+              f" verdict {entry['verdict_artefact_id']}"
+              f" pack {entry['pack_version']}")
+    for entry in queue["approved"]:
+        stale = (f" STALE moved: {', '.join(entry['moved_inputs'])}"
+                 if entry["stale"] else "")
+        print(f"APPROVED {entry['draft_kind']}"
+              f" {entry['draft_artefact_id']}"
+              f" by {entry['approver']}"
+              f" — {entry['display_status']}{stale}")
+    for entry in queue["rejected"]:
+        print(f"REJECTED {entry['draft_kind']}"
+              f" {entry['draft_artefact_id']}"
+              f" by {entry['rejecter']}"
+              f" reason {entry['reason_code']}"
+              f" note {entry['note']}")
+    print(f"{len(queue['awaiting_approval'])} awaiting,"
+          f" {len(queue['approved'])} approved — not sent,"
+          f" {len(queue['rejected'])} rejected")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="smb-commerce")
     parser.add_argument("command", choices=[
@@ -190,9 +216,16 @@ def main(argv: list[str] | None = None) -> int:
         "diagnose-verify", "refusals", "plan", "plan-verify",
         "plan-refusals", "draft", "drafts", "drafts-verify",
         "draft-refusals", "screen", "verdicts", "verdicts-verify",
-        "awaiting-approval", "model-calls"])
+        "awaiting-approval", "queue", "approve", "reject",
+        "approvals-verify", "approval-history", "approval-refusals",
+        "model-calls"])
     parser.add_argument("--kind", default=None)
     parser.add_argument("--run-id", default=None)
+    parser.add_argument("--draft", default=None)
+    parser.add_argument("--approver", default=None)
+    parser.add_argument("--rejecter", default=None)
+    parser.add_argument("--reason", default=None)
+    parser.add_argument("--note", default="")
     args = parser.parse_args(argv)
 
     service = CommerceService()
@@ -368,6 +401,92 @@ def main(argv: list[str] | None = None) -> int:
             print(f"BLOCKED {entry['draft_kind']}"
                   f" {entry['draft_artefact_id']}"
                   f" rules {', '.join(entry['blocking_rules'])}")
+        return 0
+    if args.command == "queue":
+        _print_approval_queue(service)
+        return 0
+    if args.command == "approve":
+        if not args.draft or not args.approver:
+            print("approve requires --draft and --approver")
+            return 2
+        try:
+            act = service.approve_draft(args.draft, args.approver)
+        except ApprovalRefused as refused:
+            print(f"REFUSED {refused.refusal.artefact_id} approve"
+                  f" {args.draft}:"
+                  f" {', '.join(refused.refusal.payload['problems'])}")
+            return 1
+        print(f"APPROVED {act.payload['draft_kind']}"
+              f" {act.payload['draft_artefact_id']}"
+              f" by {act.payload['approver']}"
+              f" — {act.payload['display_status']}"
+              f" act {act.artefact_id}")
+        return 0
+    if args.command == "reject":
+        if not args.draft or not args.rejecter or not args.reason:
+            print("reject requires --draft, --rejecter and --reason")
+            return 2
+        try:
+            act = service.reject_draft(
+                args.draft, args.rejecter, args.reason, args.note)
+        except ApprovalRefused as refused:
+            print(f"REFUSED {refused.refusal.artefact_id} reject"
+                  f" {args.draft}:"
+                  f" {', '.join(refused.refusal.payload['problems'])}")
+            return 1
+        print(f"REJECTED {act.payload['draft_kind']}"
+              f" {act.payload['draft_artefact_id']}"
+              f" by {act.payload['rejecter']}"
+              f" reason {act.payload['reason_code']}"
+              f" act {act.artefact_id}")
+        return 0
+    if args.command == "approvals-verify":
+        status = 0
+        count = 0
+        for kind in ACT_KINDS:
+            for act in service.store.list_artefacts(kind):
+                problems = service.approvals.verify(act)
+                print(json.dumps({"artefact_id": act.artefact_id,
+                                  "verified": not problems,
+                                  "problems": problems}))
+                status = status or (1 if problems else 0)
+                count += 1
+        if count == 0:
+            print(json.dumps({"verified": False,
+                              "problems": ["no_approval_acts"]}))
+            status = 1
+        return status
+    if args.command == "approval-history":
+        if not args.draft:
+            print("approval-history requires --draft")
+            return 2
+        for entry in service.approval_history(args.draft):
+            payload = entry["payload"]
+            if entry["kind"] == "approval_act":
+                stale = (" STALE moved:"
+                         f" {', '.join(entry['moved_inputs'])}"
+                         if entry["stale"] else "")
+                print(f"APPROVAL {entry['artefact_id']}"
+                      f" by {payload['approver']}"
+                      f" — {payload['display_status']}{stale}")
+            elif entry["kind"] == "rejection_act":
+                print(f"REJECTION {entry['artefact_id']}"
+                      f" by {payload['rejecter']}"
+                      f" reason {payload['reason_code']}"
+                      f" note {payload['note']}")
+            else:
+                print(f"REFUSAL {entry['artefact_id']}"
+                      f" {payload['action']} by {payload['actor']}:"
+                      f" {', '.join(payload['problems'])}")
+        return 0
+    if args.command == "approval-refusals":
+        refusals = service.approvals.refusals()
+        for refusal in refusals:
+            print(f"{refusal.artefact_id} {refusal.payload['action']}"
+                  f" {refusal.payload['draft_artefact_id']}"
+                  f" by {refusal.payload['actor']}:"
+                  f" {', '.join(refusal.payload['problems'])}")
+        print(f"{len(refusals)} approval refusals")
         return 0
     if args.command == "model-calls":
         calls = service.store.list_model_calls(args.run_id)

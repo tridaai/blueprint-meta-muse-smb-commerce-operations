@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from . import generator
+from .approvals import ApprovalRefused
 from .config import Settings, load_settings
 from .guardian import draft_content_hash
 from .models import Artefact
@@ -292,11 +293,72 @@ def main() -> int:
         awaiting = service.awaiting_approval()
         awaiting_ids = {e["draft_artefact_id"] for e in awaiting}
         print(f"  awaiting approval: {len(awaiting)} drafts"
-              f" (screened and passing — approval itself is a"
-              f" named human act, Round 8)")
+              f" (screened and passing — approval itself is the"
+              f" named human act below)")
         print(f"  planted draft awaiting approval:"
               f" {planted.artefact_id in awaiting_ids}"
               f" — the gate holds")
+
+        print("\n== Approval queue — the named human act ==")
+        approver = "Maya Chen"
+        for draft in drafts.values():
+            act = service.approve_draft(draft.artefact_id, approver)
+            ap_ = act.payload
+            print(f"  APPROVED {ap_['draft_kind']}"
+                  f" {draft.artefact_id} by {ap_['approver']}"
+                  f" — {ap_['display_status']}"
+                  f"  act {act.artefact_id}"
+                  f"  verified {not service.approvals.verify(act)}")
+        # One more clean draft, planted and screened, that the
+        # approver rejects — rejection is an act too, with a
+        # stated reason, and it stays on the record.
+        clean_extra_payload = dict(planted_payload)
+        clean_extra_payload["content"] = {"steps": [
+            {"subject": "A note from Hartwell Home Goods",
+             "body": "Your favourites are waiting, whenever you"
+                     " are ready to look again."},
+            {"subject": "Still there?",
+             "body": "Your favourites are waiting."},
+        ]}
+        clean_extra = Artefact(
+            artefact_id="DCE-plantedclean00000001",
+            kind="draft_email_copy", payload=clean_extra_payload,
+            input_fingerprint="planted-clean",
+        )
+        service.store.insert_artefact(clean_extra)
+        clean_verdict = service.screen_draft(clean_extra)
+        print(f"  extra draft {clean_extra.artefact_id}"
+              f" screened {clean_verdict.payload['outcome']}")
+        rejection = service.reject_draft(
+            clean_extra.artefact_id, approver, "timing",
+            "Hold until the spring catalogue lands.")
+        rj = rejection.payload
+        print(f"  REJECTED {rj['draft_kind']} {clean_extra.artefact_id}"
+              f" by {rj['rejecter']} reason {rj['reason_code']}"
+              f" note {rj['note']}"
+              f"  act {rejection.artefact_id}"
+              f"  verified {not service.approvals.verify(rejection)}")
+        # The planted bad draft cannot be approved: the attempt
+        # refuses, and the refusal is recorded.
+        try:
+            service.approve_draft(planted.artefact_id, approver)
+            print("  planted draft approval: ACCEPTED — the gate failed")
+        except ApprovalRefused as refused:
+            print(f"  planted draft approval refused:"
+                  f" {refused.refusal.artefact_id}"
+                  f" {', '.join(refused.refusal.payload['problems'])}")
+        queue = service.approval_queue()
+        print(f"  queue: {len(queue['awaiting_approval'])} awaiting,"
+              f" {len(queue['approved'])} approved,"
+              f" {len(queue['rejected'])} rejected")
+        for entry in queue["approved"]:
+            print(f"    {entry['draft_kind']}"
+                  f" {entry['draft_artefact_id']}"
+                  f" — {entry['display_status']}"
+                  f"  stale {entry['stale']}")
+        print("  approval executes nothing: no email is sent, no"
+              " budget moves — execution against real systems is"
+              " out of scope by design")
 
         print("\n== Model port (offline profile, governed) ==")
         reply = service.draft(
