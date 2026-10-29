@@ -57,6 +57,13 @@ def _print_diagnosis(artefact) -> None:
                   f" ({finding['first_week']}) ->"
                   f" {finding['latest_week_roas']} ({finding['latest_week']})"
                   f"  factor {finding['decay_factor']}")
+        elif p["diagnosis"] == "refund_anomaly":
+            print(f"  REFUND {finding['sku']} {finding['name']}"
+                  f"  rate {finding['refund_rate']}"
+                  f" over bar {finding['max_refund_rate']}"
+                  f"  refunds {finding['refunds']}"
+                  f" of gross {finding['gross_revenue']}"
+                  f"  units {finding['units_sold']}")
         elif finding["class"] == "duplicate_charge":
             print(f"  DUPLICATE {finding['vendor']} {finding['amount']}"
                   f" on {finding['dates'][0]} + {finding['dates'][1]}"
@@ -69,13 +76,6 @@ def _print_diagnosis(artefact) -> None:
                   f"  median {finding['vendor_median']}"
                   f" x{finding['multiple']}"
                   f" over {finding['charges']} charges")
-        else:  # refund_anomaly
-            print(f"  REFUND {finding['sku']} {finding['name']}"
-                  f"  rate {finding['refund_rate']}"
-                  f" over bar {finding['max_refund_rate']}"
-                  f"  refunds {finding['refunds']}"
-                  f" of gross {finding['gross_revenue']}"
-                  f"  units {finding['units_sold']}")
     for entry in p.get("informational", []):
         print(f"  NEW-VENDOR {entry['vendor']}"
               f" first charge {entry['amount']} on {entry['date']}"
