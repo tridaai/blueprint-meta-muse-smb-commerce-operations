@@ -106,6 +106,30 @@ Zero-tolerance counters:
                                    a drafting call whose recorded
                                    cost the price table cannot
                                    re-perform
+  - guardian_bypasses ............ a draft listed as awaiting
+                                   approval without a passing,
+                                   re-verified verdict, a clean
+                                   draft missing from the list, or
+                                   a blocked or unscreened draft
+                                   on it
+  - verdict_hash_mismatches_accepted
+                                   a verdict forged onto another
+                                   draft's hash that verify()
+                                   accepts
+  - guardian_hard_line_misses .... an adversarial fixture draft
+                                   (spelled-out discount, word-form
+                                   figure, competitor disparagement,
+                                   guaranteed-results language) that
+                                   the guardian does not block with
+                                   the right rule id — each fixture
+                                   first passes the Round 6 gate,
+                                   proving the guardian is a second
+                                   net and not a rerun
+  - screening_cost_reconciliation_errors
+                                   a screening call whose recorded
+                                   cost the price table cannot
+                                   re-perform, or a verdict whose
+                                   stamped call does not reconcile
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -129,6 +153,7 @@ from smb_commerce.diagnosis import DIAGNOSIS_PACK
 from smb_commerce.drafting import DraftingService, DraftRefused
 from smb_commerce.ingest import IngestPort
 from smb_commerce.modelport import GovernedModelPort, ModelReply
+from smb_commerce.models import Artefact
 from smb_commerce.plan import PlanRefused
 from smb_commerce.service import CommerceService
 from smb_commerce.store import SqlStore, canonical_json
@@ -156,6 +181,9 @@ def main() -> int:
         "plan_ranking_errors", "plan_empty_state_omissions",
         "draft_figure_mismatches_accepted", "draft_refused_leakages",
         "draft_source_binding_errors", "draft_cost_reconciliation_errors",
+        "guardian_bypasses", "verdict_hash_mismatches_accepted",
+        "guardian_hard_line_misses",
+        "screening_cost_reconciliation_errors",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -714,6 +742,126 @@ def main() -> int:
             "draft_plan_narrative"
         )) != narratives_before:
             counters["draft_refused_leakages"] += 1
+
+        # Guardian screen (Round 7): the three clean drafts must
+        # pass, verify and be listed as awaiting approval. The
+        # adversarial fixtures are drafted through doubles whose
+        # prose the Round 6 gate cannot refuse — word-form
+        # figures and a spelled-out discount — so each fixture
+        # first proves it passed drafting, then must block with
+        # the right rule id.
+        verdicts = service.screen_all()
+        for verdict in verdicts.values():
+            if verdict.payload["outcome"] != "pass":
+                counters["guardian_bypasses"] += 1
+            counters["guardian_bypasses"] += len(
+                service.guardian.verify(verdict))
+            counters["screening_cost_reconciliation_errors"] += len(
+                service.model.reconcile(
+                    verdict.payload["screening_run_id"]))
+        if {e["draft_artefact_id"]
+                for e in service.awaiting_approval()} != set(verdicts):
+            counters["guardian_bypasses"] += 1
+        if service.blocked_drafts():
+            counters["guardian_bypasses"] += 1
+
+        class ProsePort:
+            profile_name = "offline"
+            tier = "standard"
+
+            def __init__(self, model_name, prose):
+                self.model_name = model_name
+                self._prose = prose
+
+            def complete(self, system, prompt):
+                line = prompt.splitlines()[1]
+                claims = json.loads(
+                    line[len("FIGURE-SHEET "):])["claims"]
+                return ModelReply(
+                    text=json.dumps({
+                        "content": {"prose": self._prose},
+                        "claims": claims,
+                    }),
+                    profile=self.profile_name, model=self.model_name,
+                    tier=self.tier, input_tokens=10, output_tokens=5,
+                )
+
+        guardian_fixtures = (
+            ("eval-discount",
+             "Take forty percent off the decaying set's next"
+             " flight, whenever you are ready.",
+             "discount_beyond_cap"),
+            ("eval-word-figure",
+             "The set reached nine hundred new shoppers this week.",
+             "figure_not_in_claims"),
+            ("eval-disparagement",
+             "Unlike BrightNest Living, whose throws are shoddy"
+             " and fall apart within a season, ours are made to"
+             " hold.",
+             "competitor_disparagement"),
+            ("eval-guarantee",
+             "These results are guaranteed, every single week.",
+             "guaranteed_results_language"),
+        )
+        fixture_drafts = {}
+        for model_name, prose, rule_id in guardian_fixtures:
+            fixture_drafting = DraftingService(
+                service.store,
+                GovernedModelPort(
+                    ProsePort(model_name, prose), service.store),
+            )
+            fixture_draft = fixture_drafting.draft_ad_note()
+            fixture_drafts[rule_id] = fixture_draft
+            if service.drafting.verify(fixture_draft):
+                counters["guardian_hard_line_misses"] += 1
+            fixture_verdict = service.screen_draft(fixture_draft)
+            if rule_id not in fixture_verdict.payload["blocking_rules"]:
+                counters["guardian_hard_line_misses"] += 1
+            counters["screening_cost_reconciliation_errors"] += len(
+                service.model.reconcile(
+                    fixture_verdict.payload["screening_run_id"]))
+        if {e["draft_artefact_id"]
+                for e in service.awaiting_approval()} != set(verdicts):
+            counters["guardian_bypasses"] += 1
+
+        # An unscreened draft — clean prose, never screened — is
+        # never awaiting approval.
+        unscreened = DraftingService(
+            service.store,
+            GovernedModelPort(
+                ProsePort("eval-unscreened",
+                          "A quiet note on the decaying set, nothing"
+                          " more."),
+                service.store),
+        ).draft_ad_note()
+        if unscreened.artefact_id in {
+            e["draft_artefact_id"] for e in service.awaiting_approval()
+        }:
+            counters["guardian_bypasses"] += 1
+
+        # A forged verdict — a genuine pass rebound to a blocked
+        # draft, so its hash names the wrong draft — must fail
+        # verify() and must never open the gate.
+        pass_verdict = verdicts[drafts["plan_narrative"].artefact_id]
+        forged_payload = dict(pass_verdict.payload)
+        forged_payload["draft_artefact_id"] = (
+            fixture_drafts["guaranteed_results_language"].artefact_id)
+        forged = Artefact(
+            artefact_id="GRV-forged0000000000000e",
+            kind="guardian_verdict", payload=forged_payload,
+            input_fingerprint="forged",
+        )
+        service.store.insert_artefact(forged)
+        forged_problems = service.guardian.verify(forged)
+        if not any(
+            problem == "verdict_draft_hash_mismatch"
+            for problem in forged_problems
+        ):
+            counters["verdict_hash_mismatches_accepted"] += 1
+        if fixture_drafts["guaranteed_results_language"].artefact_id in {
+            e["draft_artefact_id"] for e in service.awaiting_approval()
+        }:
+            counters["guardian_bypasses"] += 1
 
         # Cost ledger: an offline call and a stubbed hosted call, each
         # re-performed against the price table, each tier-stamped.
