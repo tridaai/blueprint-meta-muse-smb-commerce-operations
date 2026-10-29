@@ -1,11 +1,13 @@
 """The CLI surface over the same service the API serves.
 
 Commands: generate, facts, ledger, verify, diagnose,
-diagnose-verify, refusals, model-calls. The diagnose commands cover
-all five diagnoses (stockout, ad decay, expense anomalies, refund
-anomalies, and the email-flow audit). Output is plain text sized for
-a terminal; figures come from the ledger artefact, never recomputed
-on the fly by the CLI itself.
+diagnose-verify, refusals, plan, plan-verify, plan-refusals,
+model-calls. The diagnose commands cover all five diagnoses
+(stockout, ad decay, expense anomalies, refund anomalies, and the
+email-flow audit); the plan commands assemble the growth plan from
+the computed record and re-verify it. Output is plain text sized
+for a terminal; figures come from the ledger artefact, never
+recomputed on the fly by the CLI itself.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import json
 import sys
 
 from .diagnosis import DiagnosisRefused
+from .plan import PlanRefused
 from .service import CommerceService
 
 
@@ -116,11 +119,38 @@ def _print_diagnosis(artefact) -> None:
                   f"  units {entry['units_sold']}")
 
 
+def _print_plan(artefact) -> None:
+    p = artefact.payload
+    print(f"growth_plan {artefact.artefact_id} pack {p['pack_version']}"
+          f" ledger {p['ledger_artefact_id']} as of {p['as_of']}"
+          f" supersedes {p['supersedes']}")
+    for figure in p["summary"]["figures"]:
+        print(f"  {figure['name']:<14} {figure['value']:>12}"
+              f"  from {figure['source_artefact_id']}")
+    for entry in p["priorities"]:
+        if entry["rank"] is None:
+            print(f"  NO-FINDINGS {entry['family']}"
+                  f" judged by diagnosis pack"
+                  f" {entry['judged_by_pack_version']}"
+                  f" ({entry['diagnosis_artefact_id']})")
+        else:
+            print(f"  PRIORITY {entry['rank']} {entry['family']}"
+                  f" {entry['finding_key']}"
+                  f" exposure {entry['exposure']}"
+                  f" ({entry['diagnosis_artefact_id']})")
+    for action in p["actions"]:
+        proposal = action["proposal_artefact_id"] or "-"
+        print(f"  ACTION {action['rank']} {action['family']}"
+              f" {action['finding_key']} proposal {proposal}"
+              f" performed {action['performed']}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="smb-commerce")
     parser.add_argument("command", choices=[
         "generate", "facts", "ledger", "verify", "diagnose",
-        "diagnose-verify", "refusals", "model-calls"])
+        "diagnose-verify", "refusals", "plan", "plan-verify",
+        "plan-refusals", "model-calls"])
     parser.add_argument("--kind", default=None)
     parser.add_argument("--run-id", default=None)
     args = parser.parse_args(argv)
@@ -184,6 +214,32 @@ def main(argv: list[str] | None = None) -> int:
                   f" pack {refusal.payload['pack_version']}:"
                   f" {', '.join(refusal.payload['problems'])}")
         print(f"{len(refusals)} refusals")
+        return 0
+    if args.command == "plan":
+        try:
+            _print_plan(service.assemble_plan())
+        except PlanRefused as refused:
+            print(f"REFUSED {refused.refusal.artefact_id} growth_plan:"
+                  f" {', '.join(refused.refusal.payload['problems'])}")
+            return 1
+        return 0
+    if args.command == "plan-verify":
+        artefact = service.store.latest_artefact("growth_plan")
+        if artefact is None:
+            print(json.dumps({"kind": "growth_plan", "verified": False,
+                              "problems": ["not_assembled"]}))
+            return 1
+        problems = service.plan.verify(artefact)
+        print(json.dumps({"artefact_id": artefact.artefact_id,
+                          "verified": not problems, "problems": problems}))
+        return 0 if not problems else 1
+    if args.command == "plan-refusals":
+        refusals = service.store.list_artefacts("plan_refusal")
+        for refusal in refusals:
+            print(f"{refusal.artefact_id} growth_plan"
+                  f" pack {refusal.payload['pack_version']}:"
+                  f" {', '.join(refusal.payload['problems'])}")
+        print(f"{len(refusals)} plan refusals")
         return 0
     if args.command == "model-calls":
         calls = service.store.list_model_calls(args.run_id)

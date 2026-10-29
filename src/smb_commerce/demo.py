@@ -171,6 +171,35 @@ def main() -> int:
                   f"  delays {pp['step_delays_hours']}"
                   f"  status {pp['status']} — changes nothing")
 
+        print("\n== Growth plan — assembled from the computed record ==")
+        plan = service.assemble_plan()
+        pp = plan.payload
+        print(f"  plan {plan.artefact_id}  plan pack {pp['pack_version']}"
+              f"  diagnosis pack {pp['diagnosis_pack_version']}"
+              f"  supersedes {pp['supersedes']}"
+              f"  verified {not service.plan.verify(plan)}")
+        print(f"  summary figures copied from {pp['ledger_artefact_id']}:")
+        for figure in pp["summary"]["figures"]:
+            print(f"    {figure['name']:<14} {figure['value']:>12}")
+        print("  priorities, in the plan pack's stated order:")
+        for entry in pp["priorities"]:
+            if entry["rank"] is None:
+                print(f"    NO-FINDINGS {entry['family']}"
+                      f"  judged by diagnosis pack"
+                      f" {entry['judged_by_pack_version']}")
+            else:
+                print(f"    {entry['rank']}. {entry['family']}"
+                      f"  {entry['finding_key']}"
+                      f"  exposure {entry['exposure']}")
+        for action in pp["actions"]:
+            if action["proposal_artefact_id"]:
+                print(f"    action {action['rank']}:"
+                      f" {action['finding_key']}"
+                      f" -> draft proposal"
+                      f" {action['proposal_artefact_id']}"
+                      f" (proposed, not performed)")
+        print(f"  the plan performs actions: {pp['performs_actions']}")
+
         print("\n== Model port (offline profile, governed) ==")
         reply = service.draft(
             "demo-run",

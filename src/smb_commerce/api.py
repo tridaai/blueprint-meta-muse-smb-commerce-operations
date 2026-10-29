@@ -196,6 +196,34 @@ def list_refusals() -> dict:
             "refusals": [r.model_dump() for r in refusals]}
 
 
+@app.get("/plan")
+def latest_plan() -> dict:
+    service = get_service()
+    artefact = service.store.latest_artefact("growth_plan")
+    if artefact is None:
+        raise HTTPException(status_code=404, detail="no plan assembled yet")
+    return artefact.model_dump()
+
+
+@app.get("/plan/verify")
+def verify_plan() -> dict:
+    service = get_service()
+    artefact = service.store.latest_artefact("growth_plan")
+    if artefact is None:
+        raise HTTPException(status_code=404, detail="no plan assembled yet")
+    problems = service.plan.verify(artefact)
+    return {"artefact_id": artefact.artefact_id, "verified": not problems,
+            "problems": problems}
+
+
+@app.get("/plan/refusals")
+def list_plan_refusals() -> dict:
+    service = get_service()
+    refusals = service.store.list_artefacts("plan_refusal")
+    return {"count": len(refusals),
+            "refusals": [r.model_dump() for r in refusals]}
+
+
 @app.get("/model-calls")
 def list_model_calls(run_id: str | None = None) -> dict:
     service = get_service()

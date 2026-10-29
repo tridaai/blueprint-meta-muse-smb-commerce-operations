@@ -1,9 +1,9 @@
 """The LangGraph operating loop.
 
 The spine never changes shape — only its nodes grow: ingest the
-dataset, compute the ledger, run the diagnosis packs, verify
-everything. Later rounds hang drafting, the guardian screen and the
-approval queue on these same nodes.
+dataset, compute the ledger, run the diagnosis packs, assemble the
+growth plan, verify everything. Later rounds hang drafting, the
+guardian screen and the approval queue on these same nodes.
 
 State is a plain dict of counts and artefact ids, never figures: the
 figures live in the artefacts, and nodes pass references.
@@ -32,6 +32,8 @@ class LoopState(TypedDict, total=False):
     refund_findings: int
     email_audit_artefact_id: str
     email_audit_findings: int
+    plan_artefact_id: str
+    plan_priorities: int
     verify_problems: list[str]
 
 
@@ -66,6 +68,15 @@ def build_graph(service: CommerceService):
             "email_audit_findings": len(audit.payload["findings"]),
         }
 
+    def plan_node(state: LoopState) -> LoopState:
+        plan = service.assemble_plan()
+        ranked = [e for e in plan.payload["priorities"]
+                  if e["rank"] is not None]
+        return {
+            "plan_artefact_id": plan.artefact_id,
+            "plan_priorities": len(ranked),
+        }
+
     def verify_node(state: LoopState) -> LoopState:
         problems: list[str] = []
         artefact = service.store.get_artefact(state["ledger_artefact_id"])
@@ -78,16 +89,23 @@ def build_graph(service: CommerceService):
                 problems.append("missing")
             else:
                 problems += service.diagnosis.verify(finding_set)
+        plan = service.store.get_artefact(state["plan_artefact_id"])
+        if plan is None:
+            problems.append("missing")
+        else:
+            problems += service.plan.verify(plan)
         return {"verify_problems": problems}
 
     graph = StateGraph(LoopState)
     graph.add_node("ingest", ingest_node)
     graph.add_node("ledger", ledger_node)
     graph.add_node("diagnose", diagnose_node)
+    graph.add_node("plan", plan_node)
     graph.add_node("verify", verify_node)
     graph.add_edge(START, "ingest")
     graph.add_edge("ingest", "ledger")
     graph.add_edge("ledger", "diagnose")
-    graph.add_edge("diagnose", "verify")
+    graph.add_edge("diagnose", "plan")
+    graph.add_edge("plan", "verify")
     graph.add_edge("verify", END)
     return graph.compile()
