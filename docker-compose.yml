@@ -1,0 +1,42 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://smb:smb@db:5432/smb
+      # Offline deterministic model profile by default; set
+      # SMB_MODEL_PROFILE=meta-muse plus META_MODEL_API_KEY to wire
+      # Muse Spark (see .env.example). Hosted profiles fail closed.
+      SMB_MODEL_PROFILE: offline
+    depends_on:
+      - db
+      - minio
+    volumes:
+      - agent-data:/app/data
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: smb
+      POSTGRES_PASSWORD: smb
+      POSTGRES_DB: smb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+  # SeaweedFS provides the S3-compatible object store locally; the
+  # service name stays `minio` after the portfolio convention.
+  minio:
+    image: chrislusf/seaweedfs:latest
+    command: "server -s3 -s3.port=8333 -dir=/data"
+    ports:
+      - "8333:8333"
+    volumes:
+      - s3-data:/data
+
+volumes:
+  agent-data:
+  pg-data:
+  s3-data:
