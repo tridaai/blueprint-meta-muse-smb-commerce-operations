@@ -3,7 +3,9 @@
 Commands: generate, facts, ledger, verify, diagnose,
 diagnose-verify, refusals, plan, plan-verify, plan-refusals,
 draft, drafts, drafts-verify, draft-refusals, screen, verdicts,
-verdicts-verify, awaiting-approval, model-calls. The
+verdicts-verify, awaiting-approval, queue, approve, reject,
+approvals-verify, approval-history, approval-refusals,
+model-calls. The
 diagnose commands cover all five diagnoses (stockout, ad decay,
 expense anomalies, refund anomalies, and the email-flow audit);
 the plan commands assemble the growth plan from the computed
@@ -11,7 +13,10 @@ record and re-verify it; the draft commands run the governed
 drafting pass over the plan and read its drafts and refusals;
 the screen commands run the guardian screen over the drafts and
 read its verdicts, the blocked list and the awaiting-approval
-gate.
+gate; the queue commands read the approval queue folded from
+the acts, and approve/reject record the named human act —
+approved always reads "approved — not sent", because approval
+executes nothing.
 Output is plain text sized for a terminal; figures come from
 the ledger artefact, never recomputed on the fly by the CLI
 itself.

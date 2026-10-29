@@ -1,9 +1,11 @@
 """The HTTP surface: health, readiness, and reads over facts,
 artefacts and the cost ledger.
 
-Round 1 is read-only by design — writes arrive in later rounds behind
-the approval queue. Every request gets a request id, echoed in the
-``X-Request-Id`` header and stamped into the JSON logs.
+Reads dominate by design; the only writes are the Round 8 approval
+acts (`POST /approvals/approve`, `POST /approvals/reject`), which
+record a named human's act and execute nothing. Every request gets
+a request id, echoed in the ``X-Request-Id`` header and stamped
+into the JSON logs.
 """
 
 from __future__ import annotations

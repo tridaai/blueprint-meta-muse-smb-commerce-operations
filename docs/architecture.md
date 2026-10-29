@@ -144,6 +144,28 @@ Every surface — API, CLI, demo, graph — talks to one
   drafts whose latest verdict passes and re-verifies clean, and
   blocked drafts carry their named blocking rules on every
   surface. Approval acts themselves are Round 8.
+- **Approvals** (`approvals.py`): the approval queue and Law 2's
+  named human act. Approval and rejection are insert-only act
+  artefacts: an approval names the approver, the draft's id and
+  content hash, and the passing guardian verdict it relies on,
+  and snapshots the bound inputs (verdict, source heads, head
+  ledger) at act time; a rejection names the rejecter and a
+  reason code from a stated vocabulary plus free text. Refused
+  attempts record an approval-refusal artefact and raise.
+  Approval refuses drafts with no passing verdict, a verdict
+  whose hash differs from the draft's, a source superseded or
+  refused since the verdict, or an existing approval — there
+  is no double-approval. The queue is derived by folding the
+  acts over the guardian's gate on every read; approved
+  entries carry the exact display status `approved — not
+  sent` and execution status `not_sent`, because the blueprint
+  executes nothing against real systems by design. Staleness
+  is derived at read time against the act's snapshot: a moved
+  ledger, superseded source or new verdict marks the entry
+  STALE with the moved inputs named, while the act itself
+  still verifies as a true historical record; an act that
+  fails `verify` (hash mismatch, non-passing verdict, a claim
+  of execution) is excluded from the approved list.
 
 ## Data model
 
