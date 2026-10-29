@@ -170,6 +170,24 @@ def verify_refund_anomalies() -> dict:
     return _verify_diagnosis("diagnosis_refund_anomaly")
 
 
+@app.get("/diagnosis/email-flow-audit")
+def latest_email_flow_audit() -> dict:
+    return _latest_diagnosis("diagnosis_email_flow_audit")
+
+
+@app.get("/diagnosis/email-flow-audit/verify")
+def verify_email_flow_audit() -> dict:
+    return _verify_diagnosis("diagnosis_email_flow_audit")
+
+
+@app.get("/diagnosis/flow-proposals")
+def list_flow_proposals() -> dict:
+    service = get_service()
+    proposals = service.store.list_artefacts("draft_flow_proposal")
+    return {"count": len(proposals),
+            "proposals": [p.model_dump() for p in proposals]}
+
+
 @app.get("/diagnosis/refusals")
 def list_refusals() -> dict:
     service = get_service()

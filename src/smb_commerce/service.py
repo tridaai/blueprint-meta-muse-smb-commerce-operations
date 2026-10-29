@@ -71,6 +71,9 @@ class CommerceService:
     def diagnose_refunds(self):
         return self.diagnosis.diagnose_refunds()
 
+    def audit_email_flows(self):
+        return self.diagnosis.audit_email_flows()
+
     # -- model -------------------------------------------------------------
     def draft(self, run_id: str, system: str, prompt: str):
         return self.model.complete(run_id, system, prompt)

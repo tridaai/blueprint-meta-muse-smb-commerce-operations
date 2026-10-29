@@ -2,10 +2,10 @@
 
 Commands: generate, facts, ledger, verify, diagnose,
 diagnose-verify, refusals, model-calls. The diagnose commands cover
-all four packs (stockout, ad decay, expense anomalies, refund
-anomalies). Output is plain text sized for a terminal; figures come
-from the ledger artefact, never recomputed on the fly by the CLI
-itself.
+all five diagnoses (stockout, ad decay, expense anomalies, refund
+anomalies, and the email-flow audit). Output is plain text sized for
+a terminal; figures come from the ledger artefact, never recomputed
+on the fly by the CLI itself.
 """
 
 from __future__ import annotations
@@ -70,12 +70,33 @@ def _print_diagnosis(artefact) -> None:
                   f"  gap {finding['gap_days']}d"
                   f" within {finding['window_days']}d"
                   f"  facts {finding['fact_ids'][0]}, {finding['fact_ids'][1]}")
+        elif p["diagnosis"] == "email_flow_audit":
+            if finding["class"] == "missing_flow":
+                print(f"  MISSING {finding['flow_key']} {finding['name']}"
+                      f"  trigger {finding['trigger']}"
+                      f"  expected steps {finding['expected_steps']}")
+            elif finding["class"] == "dormant_flow":
+                print(f"  DORMANT {finding['flow_key']} {finding['name']}"
+                      f"  status {finding['status']}"
+                      f"  steps {finding['steps']}")
+            elif finding["class"] == "step_shortfall":
+                print(f"  SHORTFALL {finding['flow_key']} {finding['name']}"
+                      f"  steps {finding['steps']}"
+                      f" of expected {finding['expected_steps']}")
+            elif finding["class"] == "delay_breach":
+                print(f"  DELAY {finding['flow_key']} {finding['name']}"
+                      f"  step {finding['step_index']}"
+                      f" delay {finding['delay_hours']}h"
+                      f" over bar {finding['max_step_delay_hours']}h")
         elif finding["class"] == "amount_outlier":
             print(f"  OUTLIER {finding['vendor']} {finding['amount']}"
                   f" on {finding['date']} ({finding['fact_id']})"
                   f"  median {finding['vendor_median']}"
                   f" x{finding['multiple']}"
                   f" over {finding['charges']} charges")
+    for entry in p.get("proposals", []):
+        print(f"  PROPOSAL {entry['flow_key']} for {entry['proposal_for']}"
+              f"  (draft only — changes nothing)")
     for entry in p.get("informational", []):
         print(f"  NEW-VENDOR {entry['vendor']}"
               f" first charge {entry['amount']} on {entry['date']}"
@@ -133,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_diagnosis(service.diagnose_ad_decay())
             _print_diagnosis(service.diagnose_expenses())
             _print_diagnosis(service.diagnose_refunds())
+            _print_diagnosis(service.audit_email_flows())
         except DiagnosisRefused as refused:
             print(f"REFUSED {refused.refusal.artefact_id}"
                   f" {refused.refusal.payload['diagnosis']}:"
@@ -142,7 +164,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "diagnose-verify":
         status = 0
         for kind in ("diagnosis_stockout", "diagnosis_ad_decay",
-                     "diagnosis_expense_anomaly", "diagnosis_refund_anomaly"):
+                     "diagnosis_expense_anomaly", "diagnosis_refund_anomaly",
+                     "diagnosis_email_flow_audit"):
             artefact = service.store.latest_artefact(kind)
             if artefact is None:
                 print(json.dumps({"kind": kind, "verified": False,

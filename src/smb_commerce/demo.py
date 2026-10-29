@@ -141,6 +141,36 @@ def main() -> int:
             print(f"  {key}")
         print(f"  -> '{generator.MISSING_FLOW}' is not defined")
 
+        print("\n== Email-flow audit — the catalogue against the definitions ==")
+        audit = service.audit_email_flows()
+        ap = audit.payload
+        print(f"  audit {audit.artefact_id}  pack {ap['pack_version']}"
+              f"  verified {not service.diagnosis.verify(audit)}")
+        for finding in ap["findings"]:
+            if finding["class"] == "missing_flow":
+                print(f"  MISSING {finding['flow_key']} {finding['name']}"
+                      f"  trigger {finding['trigger']}"
+                      f"  expected steps {finding['expected_steps']}")
+            elif finding["class"] == "dormant_flow":
+                print(f"  DORMANT {finding['flow_key']} {finding['name']}"
+                      f"  status {finding['status']}")
+            elif finding["class"] == "step_shortfall":
+                print(f"  SHORTFALL {finding['flow_key']} {finding['name']}"
+                      f"  steps {finding['steps']}"
+                      f" of expected {finding['expected_steps']}")
+            elif finding["class"] == "delay_breach":
+                print(f"  DELAY {finding['flow_key']} {finding['name']}"
+                      f"  step {finding['step_index']}"
+                      f" delay {finding['delay_hours']}h"
+                      f" over bar {finding['max_step_delay_hours']}h")
+        for proposal in service.store.list_artefacts("draft_flow_proposal"):
+            pp = proposal.payload
+            print(f"  PROPOSAL {proposal.artefact_id} {pp['flow_key']}"
+                  f" for {pp['proposal_for']}"
+                  f"  trigger {pp['trigger']}  steps {pp['steps']}"
+                  f"  delays {pp['step_delays_hours']}"
+                  f"  status {pp['status']} — changes nothing")
+
         print("\n== Model port (offline profile, governed) ==")
         reply = service.draft(
             "demo-run",
