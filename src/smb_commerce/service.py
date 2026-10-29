@@ -11,6 +11,7 @@ import logging
 
 from . import generator
 from .config import Settings, load_settings
+from .diagnosis import DiagnosisService
 from .ingest import IngestPort, IngestReport
 from .ledger import LedgerService
 from .modelport import GovernedModelPort, build_model_port
@@ -33,6 +34,7 @@ class CommerceService:
             )
         self.ingest = IngestPort(self.store)
         self.ledger = LedgerService(self.store)
+        self.diagnosis = DiagnosisService(self.store)
         self.model: GovernedModelPort = build_model_port(self.settings, self.store)
         self.objects: ObjectStore = build_object_store(self.settings)
 
@@ -55,6 +57,13 @@ class CommerceService:
         for fact in self.store.list_facts():
             counts[fact.kind] = counts.get(fact.kind, 0) + 1
         return counts
+
+    # -- diagnosis -----------------------------------------------------------
+    def diagnose_stockout(self):
+        return self.diagnosis.diagnose_stockout()
+
+    def diagnose_ad_decay(self):
+        return self.diagnosis.diagnose_ad_decay()
 
     # -- model -------------------------------------------------------------
     def draft(self, run_id: str, system: str, prompt: str):
