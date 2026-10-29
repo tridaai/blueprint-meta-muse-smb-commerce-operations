@@ -89,6 +89,23 @@ Zero-tolerance counters:
                                    entry is absent from a plan, or
                                    does not name the pack version
                                    that judged it
+  - draft_figure_mismatches_accepted
+                                   a stored draft whose claims do
+                                   not re-resolve against the
+                                   artefacts they cite, a prose
+                                   figure no claim carries, or a
+                                   narrative out of the plan's
+                                   priority order
+  - draft_refused_leakages ....... a refused (careless-model) draft
+                                   stored as usable, or a careless
+                                   draft that was not refused at all
+  - draft_source_binding_errors .. a draft bound to anything but
+                                   the exact plan / proposal /
+                                   diagnosis artefact it drafts from
+  - draft_cost_reconciliation_errors
+                                   a drafting call whose recorded
+                                   cost the price table cannot
+                                   re-perform
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -97,6 +114,7 @@ Exit code 0 on PASS, 1 on FAIL.
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import tempfile
 from datetime import date, timedelta
@@ -108,7 +126,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from smb_commerce import generator
 from smb_commerce.config import Settings, load_settings
 from smb_commerce.diagnosis import DIAGNOSIS_PACK
+from smb_commerce.drafting import DraftingService, DraftRefused
 from smb_commerce.ingest import IngestPort
+from smb_commerce.modelport import GovernedModelPort, ModelReply
 from smb_commerce.plan import PlanRefused
 from smb_commerce.service import CommerceService
 from smb_commerce.store import SqlStore, canonical_json
@@ -134,6 +154,8 @@ def main() -> int:
         "flow_definition_mutations",
         "plan_figure_mismatches", "plan_citation_errors",
         "plan_ranking_errors", "plan_empty_state_omissions",
+        "draft_figure_mismatches_accepted", "draft_refused_leakages",
+        "draft_source_binding_errors", "draft_cost_reconciliation_errors",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -609,6 +631,89 @@ def main() -> int:
             fixture_plan
         ]:
             counters["plan_citation_errors"] += 1
+
+        # Drafting (Round 6): the offline drafts over the verified
+        # plan must verify clean, bind to the exact artefacts they
+        # draft from, walk the plan's priorities in order, and
+        # reconcile in the cost ledger. A careless model double
+        # that invents a figure must be refused, with nothing
+        # stored as usable.
+        drafts = service.draft_all()
+        for draft in drafts.values():
+            problems = service.drafting.verify(draft)
+            counters["draft_figure_mismatches_accepted"] += len(problems)
+            if draft.payload["status"] != "draft":
+                counters["draft_source_binding_errors"] += 1
+            counters["draft_cost_reconciliation_errors"] += len(
+                service.model.reconcile(draft.payload["run_id"]))
+        narrative = drafts["plan_narrative"]
+        if narrative.payload["source_bindings"].get("plan") != (
+            plan.artefact_id
+        ):
+            counters["draft_source_binding_errors"] += 1
+        prose = narrative.payload["content"]["prose"]
+        positions = [
+            prose.index(entry["finding_key"])
+            for entry in plan.payload["priorities"]
+            if entry["rank"] is not None
+        ]
+        if positions != sorted(positions):
+            counters["draft_figure_mismatches_accepted"] += 1
+        copy_draft = drafts["winback_email_copy"]
+        if copy_draft.payload["source_bindings"].get("proposal") != (
+            dataset_proposals[0].artefact_id
+        ):
+            counters["draft_source_binding_errors"] += 1
+        steps = copy_draft.payload["content"]["steps"]
+        if (len(steps) != 2
+                or steps[0]["subject"]
+                != "We miss you at Hartwell Home Goods"
+                or "336 hours" not in steps[1]["body"]):
+            counters["draft_figure_mismatches_accepted"] += 1
+        note = drafts["ad_budget_note"]
+        if note.payload["source_bindings"].get("diagnosis") != (
+            decay.artefact_id
+        ):
+            counters["draft_source_binding_errors"] += 1
+
+        class CarelessPort:
+            profile_name = "offline"
+            model_name = "careless-double"
+            tier = "standard"
+
+            def complete(self, system, prompt):
+                line = prompt.splitlines()[1]
+                claims = json.loads(
+                    line[len("FIGURE-SHEET "):])["claims"]
+                claims[0] = dict(claims[0], value="999999.99")
+                return ModelReply(
+                    text=json.dumps({
+                        "content": {"prose": "A fine quarter."},
+                        "claims": claims,
+                    }),
+                    profile=self.profile_name, model=self.model_name,
+                    tier=self.tier, input_tokens=10, output_tokens=5,
+                )
+
+        careless = DraftingService(
+            service.store,
+            GovernedModelPort(CarelessPort(), service.store),
+        )
+        narratives_before = len(
+            service.store.list_artefacts("draft_plan_narrative"))
+        try:
+            careless.draft_plan_narrative(plan)
+            counters["draft_refused_leakages"] += 1
+        except DraftRefused as refused_error:
+            if not any(
+                problem.startswith("draft_figure_mismatch")
+                for problem in refused_error.refusal.payload["problems"]
+            ):
+                counters["draft_refused_leakages"] += 1
+        if len(service.store.list_artefacts(
+            "draft_plan_narrative"
+        )) != narratives_before:
+            counters["draft_refused_leakages"] += 1
 
         # Cost ledger: an offline call and a stubbed hosted call, each
         # re-performed against the price table, each tier-stamped.
