@@ -70,6 +70,25 @@ Zero-tolerance counters:
   - audit_reperformance_mismatches an email-audit verifier problem
   - flow_definition_mutations      an email_flow fact whose stored
                                    form changed across an audit run
+  - plan_figure_mismatches ........ a growth-plan figure that does
+                                   not re-resolve against the ledger
+                                   artefact it cites, or a figure
+                                   problem from the plan verifier
+  - plan_citation_errors ......... a plan citation to a missing,
+                                   refused or superseded artefact, a
+                                   proposal citation that does not
+                                   resolve, or a refused diagnosis
+                                   that failed to block a plan
+  - plan_ranking_errors .......... a plan priority out of the plan
+                                   pack's stated order (family, then
+                                   exposure descending, then key)
+                                   against the hand-computed fixture
+                                   order
+  - plan_empty_state_omissions ... a diagnosis family with no
+                                   findings whose explicit no-findings
+                                   entry is absent from a plan, or
+                                   does not name the pack version
+                                   that judged it
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -90,6 +109,7 @@ from smb_commerce import generator
 from smb_commerce.config import Settings, load_settings
 from smb_commerce.diagnosis import DIAGNOSIS_PACK
 from smb_commerce.ingest import IngestPort
+from smb_commerce.plan import PlanRefused
 from smb_commerce.service import CommerceService
 from smb_commerce.store import SqlStore, canonical_json
 
@@ -112,6 +132,8 @@ def main() -> int:
         "email_dormant_false_positives", "email_dormant_false_negatives",
         "draft_proposal_mismatches", "audit_reperformance_mismatches",
         "flow_definition_mutations",
+        "plan_figure_mismatches", "plan_citation_errors",
+        "plan_ranking_errors", "plan_empty_state_omissions",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -419,6 +441,174 @@ def main() -> int:
             counters["flow_definition_mutations"] += 1
         grade_audit(audit_fixture, fixture_audit,
                     {generator.MISSING_FLOW}, {"post_purchase"})
+
+        # Growth plan (Round 5): the plan over the dataset must
+        # verify clean, its summary figures must re-resolve against
+        # the ledger it cites, and its priority order must equal the
+        # hand-computed order from the plan pack's stated rule —
+        # family order (stockout, decay, expense, refund, audit),
+        # then exposure descending, then key: the throw at 280
+        # trailing units, Social at 500.00 x 52 weeks of spend, the
+        # PackShip duplicate at 349.00, the vase at 9,568.00
+        # refunded, winback structural at 0.
+        def grade_plan_problems(svc, plan):
+            for problem in svc.plan.verify(plan):
+                if problem.startswith("plan_figure_mismatch"):
+                    counters["plan_figure_mismatches"] += 1
+                elif (problem.startswith("citation")
+                        or problem.startswith("plan_citation_error")):
+                    counters["plan_citation_errors"] += 1
+                else:
+                    counters["plan_figure_mismatches"] += 1
+
+        plan = service.assemble_plan()
+        grade_plan_problems(service, plan)
+        ledger = service.store.get_artefact(plan.payload["ledger_artefact_id"])
+        for figure in plan.payload["summary"]["figures"]:
+            if (figure["source_artefact_id"] != ledger.artefact_id
+                    or figure["value"]
+                    != ledger.payload[figure["source_field"]]):
+                counters["plan_figure_mismatches"] += 1
+        ranked = [e for e in plan.payload["priorities"]
+                  if e["rank"] is not None]
+        expected_ranking = [
+            ("stockout_risk", generator.FAST_MOVER_SKU, "280"),
+            ("ad_decay", generator.DECAY_SET, "26000.00"),
+            ("expense_anomaly", None, "349.00"),
+            ("refund_anomaly", "HW-VAS-004", "9568.00"),
+            ("email_flow_audit", "winback|missing_flow", "0"),
+        ]
+        if len(ranked) != len(expected_ranking):
+            counters["plan_ranking_errors"] += 1
+        for entry, (family, key, exposure) in zip(ranked, expected_ranking):
+            if entry["family"] != family or entry["exposure"] != exposure:
+                counters["plan_ranking_errors"] += 1
+            elif key is not None and entry["finding_key"] != key:
+                counters["plan_ranking_errors"] += 1
+            elif key is None and not entry["finding_key"].startswith(
+                f"{generator.DUPLICATE_VENDOR}|duplicate_charge|"
+            ):
+                counters["plan_ranking_errors"] += 1
+        dataset_proposals = service.store.list_artefacts(
+            "draft_flow_proposal")
+        winback_action = next(
+            a for a in plan.payload["actions"]
+            if a["family"] == "email_flow_audit"
+        )
+        if (len(dataset_proposals) != 1
+                or winback_action["proposal_artefact_id"]
+                != dataset_proposals[0].artefact_id):
+            counters["plan_citation_errors"] += 1
+        if [e for e in plan.payload["priorities"] if e["rank"] is None]:
+            counters["plan_empty_state_omissions"] += 1
+
+        # Empty-state and exposure grading needs a record where
+        # families judge empty: a fixture with two stockout SKUs
+        # (280 and 140 trailing units) and every catalogue flow
+        # defined and healthy. Ad decay, expenses, refunds and the
+        # audit must each contribute a named no-findings entry.
+        plan_fixture_settings = Settings(
+            database_url="", sqlite_path=tmp_path / "plan-fixture.db",
+            migrations_dir=base.migrations_dir,
+            object_dir=tmp_path / "plan-fixture-objects",
+            s3_endpoint="", s3_bucket=base.s3_bucket,
+            model_profile="offline", model_tier="standard",
+            log_level="WARNING",
+        )
+        plan_fixture = CommerceService(plan_fixture_settings)
+        plan_fixture_items = [
+            {"kind": "order", "natural_key": "order:HW-THR-002:2025-12-20",
+             "payload": {"order_id": "F-1", "sku": "HW-THR-002",
+                         "date": "2025-12-20", "qty": 280,
+                         "unit_price": "64.00", "amount": "17920.00"},
+             "source_system": generator.SOURCE_ORDERS,
+             "as_of": "2025-12-20"},
+            {"kind": "inventory",
+             "natural_key": "inventory:HW-THR-002:2025-12-29",
+             "payload": {"sku": "HW-THR-002", "week_start": "2025-12-29",
+                         "on_hand": 210},
+             "source_system": generator.SOURCE_INVENTORY,
+             "as_of": "2025-12-29"},
+            {"kind": "order", "natural_key": "order:HW-CAN-003:2025-12-20",
+             "payload": {"order_id": "F-2", "sku": "HW-CAN-003",
+                         "date": "2025-12-20", "qty": 140,
+                         "unit_price": "38.00", "amount": "5320.00"},
+             "source_system": generator.SOURCE_ORDERS,
+             "as_of": "2025-12-20"},
+            {"kind": "inventory",
+             "natural_key": "inventory:HW-CAN-003:2025-12-29",
+             "payload": {"sku": "HW-CAN-003", "week_start": "2025-12-29",
+                         "on_hand": 100},
+             "source_system": generator.SOURCE_INVENTORY,
+             "as_of": "2025-12-29"},
+        ]
+        plan_fixture_items += [
+            {"kind": "email_flow", "natural_key": f"flow:{entry['flow_key']}",
+             "payload": {"flow_key": entry["flow_key"],
+                         "name": entry["name"], "status": "active",
+                         "steps": entry["expected_steps"]},
+             "source_system": generator.SOURCE_EMAIL, "as_of": "2026-01-04"}
+            for entry in DIAGNOSIS_PACK["email_flow_audit"]["catalogue"]
+        ]
+        plan_fixture.ingest.ingest_many(plan_fixture_items)
+        fixture_plan = plan_fixture.assemble_plan()
+        grade_plan_problems(plan_fixture, fixture_plan)
+        fixture_ranked = [e for e in fixture_plan.payload["priorities"]
+                          if e["rank"] is not None]
+        expected_fixture = [
+            ("stockout_risk", "HW-THR-002", "280"),
+            ("stockout_risk", "HW-CAN-003", "140"),
+        ]
+        if len(fixture_ranked) != len(expected_fixture):
+            counters["plan_ranking_errors"] += 1
+        for entry, (family, key, exposure) in zip(
+            fixture_ranked, expected_fixture
+        ):
+            if (entry["family"] != family or entry["finding_key"] != key
+                    or entry["exposure"] != exposure):
+                counters["plan_ranking_errors"] += 1
+        fixture_coverage = {
+            e["family"]: e for e in fixture_plan.payload["priorities"]
+            if e["rank"] is None
+        }
+        for family in ("ad_decay", "expense_anomaly", "refund_anomaly",
+                       "email_flow_audit"):
+            entry = fixture_coverage.get(family)
+            if (entry is None or entry["status"] != "no_findings"
+                    or entry["judged_by_pack_version"]
+                    != DIAGNOSIS_PACK["version"]):
+                counters["plan_empty_state_omissions"] += 1
+
+        # A refused diagnosis must block the plan whole: tamper
+        # with a fixture fact behind the store's back and the
+        # assembler must raise PlanRefused naming the diagnosis
+        # refusal, storing no plan.
+        plan_fixture.ledger.compute()
+        target = next(
+            f for f in plan_fixture.store.list_facts("order")
+            if f.payload["sku"] == "HW-THR-002"
+        )
+        tampered = dict(target.payload)
+        tampered["qty"] = int(tampered["qty"]) + 1
+        plan_fixture.store._conn.execute(
+            "UPDATE facts SET payload = ? WHERE fact_id = ?",
+            (canonical_json(tampered), target.fact_id),
+        )
+        plan_fixture.store._conn.commit()
+        try:
+            plan_fixture.assemble_plan()
+            counters["plan_citation_errors"] += 1
+        except PlanRefused as refused_error:
+            refusal = refused_error.refusal
+            if not refusal.payload["blocking_refusals"] or not all(
+                problem.startswith("diagnosis_refused:")
+                for problem in refusal.payload["problems"]
+            ):
+                counters["plan_citation_errors"] += 1
+        if plan_fixture.store.list_artefacts("growth_plan") != [
+            fixture_plan
+        ]:
+            counters["plan_citation_errors"] += 1
 
         # Cost ledger: an offline call and a stubbed hosted call, each
         # re-performed against the price table, each tier-stamped.
