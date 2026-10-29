@@ -96,7 +96,9 @@ Every surface — API, CLI, demo, graph — talks to one
   finding sets; Round 6 inserted the draft node between plan and
   verify, and the verify node re-performs the drafts too; later
   rounds insert nodes between `verify` and `END` without
-  changing the spine.
+  changing the spine. Round 7 inserted the screen node between
+  draft and verify, and the verify node re-performs the guardian
+  verdicts alongside everything else.
 - **Plan** (`plan.py`): the growth plan assembler and its verifier.
   The plan pack states the family order, the per-family exposure
   fields and the summary figure list as data; the assembler copies
@@ -120,6 +122,28 @@ Every surface — API, CLI, demo, graph — talks to one
   stored draft at any time, the stamped call included. The
   offline profile composes its drafting replies from the figure
   sheet alone, so the gate passes deterministically offline.
+- **Guardian** (`guardian.py`): the screening service and the
+  second of Law 2's gates. A versioned policy pack states the
+  hard lines as data — the authorised discount cap, the
+  prohibited content classes, the competitor names — and the
+  service judges those lines in code: discount promises in
+  digits or words, claims re-resolved under the drafting
+  discipline, prose figures in digit *and* word form (the net
+  the drafting scan cannot see), prohibited phrases, and
+  sources superseded or refused since drafting. The judgement
+  calls (tone and pressure, misleading perk claims) go through
+  the governed model port as a separate screening call under a
+  screen-sheet contract; the offline profile answers it
+  deterministically from the pack's stated phrases, and an
+  unusable reply blocks rather than passes. Every verdict is an
+  insert-only artefact bound to the draft's id and content hash
+  and stamped with the pack version and the screening call;
+  `verify` re-performs the hash, the code-judged outcomes and
+  the stamped call's cost at any time. The approval gate lives
+  here, not in the surfaces: `awaiting_approval` lists only
+  drafts whose latest verdict passes and re-verifies clean, and
+  blocked drafts carry their named blocking rules on every
+  surface. Approval acts themselves are Round 8.
 
 ## Data model
 
