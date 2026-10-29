@@ -20,7 +20,7 @@ from conftest import make_settings
 
 
 def test_pack_is_versioned_data_with_stated_thresholds():
-    assert DIAGNOSIS_PACK["version"] == "2026.10.1"
+    assert DIAGNOSIS_PACK["version"] == "2026.10.2"
     stockout = DIAGNOSIS_PACK["stockout"]
     assert stockout["velocity_window_days"] == 28
     assert stockout["max_cover_days"] == "24.00"
@@ -29,6 +29,16 @@ def test_pack_is_versioned_data_with_stated_thresholds():
     assert decay["min_weeks"] == 8
     assert decay["decay_flag_max_factor"] == "0.5000"
     assert decay["steady_band_min_factor"] == "0.9000"
+
+
+def test_prior_pack_version_is_kept_verbatim():
+    from smb_commerce.diagnosis import DIAGNOSIS_PACKS
+
+    prior = DIAGNOSIS_PACKS["2026.10.1"]
+    assert prior["stockout"] == DIAGNOSIS_PACK["stockout"]
+    assert prior["ad_decay"] == DIAGNOSIS_PACK["ad_decay"]
+    assert "expense_anomaly" not in prior
+    assert "refund_anomaly" not in prior
 
 
 def test_stockout_finding_is_the_planted_fast_mover(service):

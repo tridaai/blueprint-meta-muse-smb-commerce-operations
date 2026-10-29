@@ -1,14 +1,19 @@
-"""Diagnosis packs I: stockout risk and ad-decay findings.
+"""Diagnosis packs I and II: stockout, ad-decay, expense and refund.
 
-Law 5 lives here. Both diagnoses read the head ledger artefact's own
-figures (route 1) and are re-performed from the stored facts by a
+Law 5 lives here. Every diagnosis reads the head ledger artefact's
+own figures (route 1) and is re-performed from the stored facts by a
 second route before a finding set may exist (route 2). One wrong
 figure — or a ledger that no longer matches the fact set — refuses
 the whole finding set: a refusal artefact is recorded and
 ``DiagnosisRefused`` is raised. Nothing partial is ever stored as a
 finding.
 
-The rules are data, in ``DIAGNOSIS_PACK`` below, versioned as a pack:
+The rules are data, in the packs below, versioned as packs. Pack
+``2026.10.2`` (the current ``DIAGNOSIS_PACK``) extends ``2026.10.1``
+with the expense and refund rules; the stockout and ad-decay sections
+are carried over unchanged, and the earlier pack is kept verbatim in
+``DIAGNOSIS_PACKS`` so a finding set stamped with its version still
+re-performs under its own version in ``verify``:
 
 - Stockout: velocity is gross units sold over the trailing window
   ending at the ledger's as-of date. A SKU whose cover days (from the
@@ -25,6 +30,21 @@ The rules are data, in ``DIAGNOSIS_PACK`` below, versioned as a pack:
   decay bar. The pack also states a steady band: a set retaining at
   least that fraction of its first-week return is healthy by
   construction, so steady sets are never named.
+- Expense anomalies: computed from the expense facts. An exact
+  duplicate is the same vendor charging the same amount again within
+  the pack's day window; the finding names both fact ids. An amount
+  outlier is a charge above the pack's multiple of that vendor's own
+  median charge, with the median and the multiple on the finding's
+  face; a vendor with fewer charges than the pack's minimum for a
+  median reads as unjudged, with the reason — never silently passed.
+  A vendor's first charge above the pack's threshold is named as
+  informational, in its own class, separate from the two anomaly
+  classes.
+- Refund anomalies: a SKU's refund rate — refund amounts over gross
+  revenue, the ledger's own per-SKU figures — above the pack's bar,
+  judged only over at least the pack's minimum units sold. A SKU
+  below the minimum reads as unjudged with the reason, never as a
+  clean rate.
 """
 
 from __future__ import annotations
@@ -39,8 +59,9 @@ from .store import SqlStore, canonical_json
 
 CENT = Decimal("0.01")
 ROAS_PLACES = Decimal("0.0001")
+RATE_PLACES = Decimal("0.000001")
 
-DIAGNOSIS_PACK = {
+DIAGNOSIS_PACK_V1 = {
     "version": "2026.10.1",
     "stockout": {
         "velocity_window_days": 28,
@@ -54,8 +75,46 @@ DIAGNOSIS_PACK = {
     },
 }
 
+DIAGNOSIS_PACK = {
+    "version": "2026.10.2",
+    "stockout": {
+        "velocity_window_days": 28,
+        "max_cover_days": "24.00",
+    },
+    "ad_decay": {
+        "min_total_spend": "2600.00",
+        "min_weeks": 8,
+        "decay_flag_max_factor": "0.5000",
+        "steady_band_min_factor": "0.9000",
+    },
+    "expense_anomaly": {
+        "duplicate_window_days": 7,
+        "outlier_min_charges": 3,
+        "outlier_multiple": "3.00",
+        "new_vendor_threshold": "1000.00",
+    },
+    "refund_anomaly": {
+        "max_refund_rate": "0.040000",
+        "min_units_sold": 1000,
+    },
+}
+
+DIAGNOSIS_PACKS = {
+    pack["version"]: pack
+    for pack in (DIAGNOSIS_PACK_V1, DIAGNOSIS_PACK)
+}
+
+
+def _pack_for(version: str | None) -> dict | None:
+    """The pack a finding set was stamped with, or None when the
+    version is not one this code knows."""
+    return DIAGNOSIS_PACKS.get(version or "")
+
+
 STOCKOUT_KIND = "diagnosis_stockout"
 AD_DECAY_KIND = "diagnosis_ad_decay"
+EXPENSE_KIND = "diagnosis_expense_anomaly"
+REFUND_KIND = "diagnosis_refund_anomaly"
 REFUSAL_KIND = "diagnosis_refusal"
 
 
@@ -84,11 +143,11 @@ def _week_label(iso_date: str) -> str:
 # -- stockout -----------------------------------------------------------
 
 
-def _classify_stockout(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+def _classify_stockout(rows: list[dict], pack: dict) -> tuple[list[dict], list[dict]]:
     """SKU evaluations -> (findings, no_data). Shared shaping: the two
     routes differ in how the rows are derived, never in how they are
     judged, so a disagreement is a computation disagreement."""
-    rules = DIAGNOSIS_PACK["stockout"]
+    rules = pack["stockout"]
     horizon = Decimal(rules["max_cover_days"])
     findings, no_data = [], []
     for row in rows:
@@ -110,11 +169,12 @@ def _classify_stockout(rows: list[dict]) -> tuple[list[dict], list[dict]]:
     return findings, no_data
 
 
-def _stockout_route1(ledger: Artefact, facts: list[Fact]) -> tuple[list, list]:
+def _stockout_route1(ledger: Artefact, facts: list[Fact],
+                     pack: dict) -> tuple[list, list]:
     """From the head ledger artefact's own figures; velocity and the
     no-data determination read the facts, which the ledger does not
     carry."""
-    rules = DIAGNOSIS_PACK["stockout"]
+    rules = pack["stockout"]
     window_days = rules["velocity_window_days"]
     as_of = date.fromisoformat(ledger.payload["as_of"])
     window_start = as_of - timedelta(days=window_days - 1)
@@ -148,13 +208,14 @@ def _stockout_route1(ledger: Artefact, facts: list[Fact]) -> tuple[list, list]:
             "trailing_velocity_per_day": str(velocity),
             "no_data_reason": reason,
         })
-    return _classify_stockout(rows)
+    return _classify_stockout(rows, pack)
 
 
-def _stockout_route2(facts: list[Fact], as_of: date) -> tuple[list, list]:
+def _stockout_route2(facts: list[Fact], as_of: date,
+                     pack: dict) -> tuple[list, list]:
     """From the facts alone, grouped by SKU in key order: on-hand from
     the latest inventory position, cover recomputed from the window."""
-    rules = DIAGNOSIS_PACK["stockout"]
+    rules = pack["stockout"]
     window_days = rules["velocity_window_days"]
     window_start = as_of - timedelta(days=window_days - 1)
     ordered = sorted(facts, key=lambda f: f.natural_key)
@@ -207,16 +268,17 @@ def _stockout_route2(facts: list[Fact], as_of: date) -> tuple[list, list]:
             "trailing_velocity_per_day": str(velocity),
             "no_data_reason": reason,
         })
-    return _classify_stockout(rows)
+    return _classify_stockout(rows, pack)
 
 
 # -- ad decay -------------------------------------------------------------
 
 
-def _classify_decay(series: dict[str, dict]) -> tuple[list[dict], list[dict]]:
+def _classify_decay(series: dict[str, dict],
+                    pack: dict) -> tuple[list[dict], list[dict]]:
     """Per-set weekly series -> (findings, unjudged). Shared shaping,
     as with stockout: routes differ in derivation, not in judgement."""
-    rules = DIAGNOSIS_PACK["ad_decay"]
+    rules = pack["ad_decay"]
     min_spend = Decimal(rules["min_total_spend"])
     flag_bar = Decimal(rules["decay_flag_max_factor"])
     findings, unjudged = [], []
@@ -261,15 +323,15 @@ def _classify_decay(series: dict[str, dict]) -> tuple[list[dict], list[dict]]:
     return findings, unjudged
 
 
-def _decay_route1(ledger: Artefact) -> tuple[list, list]:
+def _decay_route1(ledger: Artefact, pack: dict) -> tuple[list, list]:
     series = {
         row["ad_set"]: {"total_spend": row["spend"], "weeks": row["weekly"]}
         for row in ledger.payload["ad_sets"]
     }
-    return _classify_decay(series)
+    return _classify_decay(series, pack)
 
 
-def _decay_route2(facts: list[Fact]) -> tuple[list, list]:
+def _decay_route2(facts: list[Fact], pack: dict) -> tuple[list, list]:
     grouped: dict[str, dict[str, dict[str, Decimal]]] = {}
     for fact in sorted(facts, key=lambda f: f.natural_key):
         if fact.kind != "ad_daily":
@@ -295,7 +357,225 @@ def _decay_route2(facts: list[Fact]) -> tuple[list, list]:
                 for week, w in sorted(weeks.items())
             ],
         }
-    return _classify_decay(series)
+    return _classify_decay(series, pack)
+
+
+# -- expense anomalies ----------------------------------------------------
+
+
+def _median(amounts: list[Decimal]) -> Decimal:
+    ordered = sorted(amounts)
+    count = len(ordered)
+    mid = count // 2
+    if count % 2:
+        return ordered[mid]
+    return ((ordered[mid - 1] + ordered[mid]) / 2).quantize(
+        CENT, rounding=ROUND_HALF_UP
+    )
+
+
+def _classify_expenses(
+    vendors: dict[str, list[dict]], pack: dict
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Per-vendor charge lists -> (findings, informational, unjudged).
+
+    Shared shaping, as with the pack I diagnoses: the routes differ in
+    how the charge lists are derived, never in how they are judged."""
+    rules = pack["expense_anomaly"]
+    window = rules["duplicate_window_days"]
+    min_charges = rules["outlier_min_charges"]
+    multiple = Decimal(rules["outlier_multiple"])
+    threshold = Decimal(rules["new_vendor_threshold"])
+    findings, informational, unjudged = [], [], []
+    for vendor in sorted(vendors):
+        charges = sorted(
+            vendors[vendor], key=lambda c: (c["date"], c["fact_id"])
+        )
+        by_amount: dict[str, list[dict]] = {}
+        for charge in charges:
+            by_amount.setdefault(charge["amount"], []).append(charge)
+        for amount in sorted(by_amount):
+            group = by_amount[amount]
+            for first, second in zip(group, group[1:]):
+                gap = (
+                    date.fromisoformat(second["date"])
+                    - date.fromisoformat(first["date"])
+                ).days
+                if gap <= window:
+                    findings.append({
+                        "class": "duplicate_charge",
+                        "vendor": vendor,
+                        "amount": amount,
+                        "dates": [first["date"], second["date"]],
+                        "fact_ids": [first["fact_id"], second["fact_id"]],
+                        "gap_days": gap,
+                        "window_days": window,
+                    })
+        if len(charges) < min_charges:
+            unjudged.append({
+                "vendor": vendor,
+                "reason": "insufficient_charges",
+                "charges": len(charges),
+            })
+        else:
+            median = _median([Decimal(c["amount"]) for c in charges])
+            for charge in charges:
+                if Decimal(charge["amount"]) > multiple * median:
+                    findings.append({
+                        "class": "amount_outlier",
+                        "vendor": vendor,
+                        "fact_id": charge["fact_id"],
+                        "date": charge["date"],
+                        "amount": charge["amount"],
+                        "vendor_median": str(median),
+                        "multiple": rules["outlier_multiple"],
+                        "charges": len(charges),
+                    })
+        first_charge = charges[0]
+        if Decimal(first_charge["amount"]) > threshold:
+            informational.append({
+                "class": "new_vendor_first_charge",
+                "vendor": vendor,
+                "fact_id": first_charge["fact_id"],
+                "date": first_charge["date"],
+                "amount": first_charge["amount"],
+                "threshold": rules["new_vendor_threshold"],
+            })
+    findings.sort(key=lambda f: (
+        f["vendor"], f["class"],
+        f["fact_ids"] if f["class"] == "duplicate_charge" else [f["fact_id"]],
+    ))
+    informational.sort(key=lambda f: f["vendor"])
+    unjudged.sort(key=lambda f: f["vendor"])
+    return findings, informational, unjudged
+
+
+def _expense_route1(facts: list[Fact], pack: dict) -> tuple[list, list, list]:
+    """From the expense facts in store order, grouped by vendor as
+    they arrive."""
+    vendors: dict[str, list[dict]] = {}
+    for fact in facts:
+        if fact.kind != "expense":
+            continue
+        p = fact.payload
+        vendors.setdefault(p["vendor"], []).append({
+            "fact_id": fact.fact_id, "date": p["date"], "amount": p["amount"],
+        })
+    return _classify_expenses(vendors, pack)
+
+
+def _expense_route2(facts: list[Fact], pack: dict) -> tuple[list, list, list]:
+    """From the expense facts as flat tuples sorted by (vendor, date,
+    fact id): a different derivation of the same charge lists."""
+    rows = sorted(
+        (f.payload["vendor"], f.payload["date"], f.fact_id,
+         f.payload["amount"])
+        for f in facts
+        if f.kind == "expense"
+    )
+    vendors: dict[str, list[dict]] = {}
+    for vendor, day, fact_id, amount in rows:
+        vendors.setdefault(vendor, []).append({
+            "fact_id": fact_id, "date": day, "amount": amount,
+        })
+    return _classify_expenses(vendors, pack)
+
+
+# -- refund anomalies -------------------------------------------------------
+
+
+def _refund_rate(refunds: Decimal, gross: Decimal) -> str:
+    if not gross:
+        return "0.000000"
+    return str((refunds / gross).quantize(RATE_PLACES, rounding=ROUND_HALF_UP))
+
+
+def _classify_refunds(rows: list[dict], pack: dict) -> tuple[list[dict], list[dict]]:
+    """Per-SKU ledger figures -> (findings, unjudged). Shared shaping,
+    as with the other diagnoses."""
+    rules = pack["refund_anomaly"]
+    bar = Decimal(rules["max_refund_rate"])
+    min_units = rules["min_units_sold"]
+    findings, unjudged = [], []
+    for row in rows:
+        if row["units_sold"] < min_units:
+            unjudged.append({
+                "sku": row["sku"],
+                "reason": "below_min_volume",
+                "units_sold": row["units_sold"],
+            })
+            continue
+        rate = _refund_rate(Decimal(row["refunds"]),
+                            Decimal(row["gross_revenue"]))
+        if Decimal(rate) > bar:
+            findings.append({
+                "sku": row["sku"],
+                "name": row["name"],
+                "gross_revenue": row["gross_revenue"],
+                "refunds": row["refunds"],
+                "refund_rate": rate,
+                "units_sold": row["units_sold"],
+                "units_refunded": row["units_refunded"],
+                "max_refund_rate": rules["max_refund_rate"],
+            })
+    findings.sort(key=lambda f: f["sku"])
+    unjudged.sort(key=lambda f: f["sku"])
+    return findings, unjudged
+
+
+def _refund_route1(ledger: Artefact, pack: dict) -> tuple[list, list]:
+    """From the head ledger artefact's own per-SKU figures."""
+    rows = [
+        {
+            "sku": row["sku"],
+            "name": row["name"],
+            "gross_revenue": row["gross_revenue"],
+            "refunds": row["refunds"],
+            "units_sold": row["units_sold"],
+            "units_refunded": row["units_refunded"],
+        }
+        for row in ledger.payload["skus"]
+    ]
+    return _classify_refunds(rows, pack)
+
+
+def _refund_route2(facts: list[Fact], pack: dict) -> tuple[list, list]:
+    """From the order and refund facts alone, accumulated per SKU in
+    key order over the price book's SKUs."""
+    from .generator import SKUS
+
+    totals: dict[str, dict] = {
+        spec.sku: {
+            "sku": spec.sku, "name": spec.name,
+            "gross": Decimal("0"), "refunds": Decimal("0"),
+            "units_sold": 0, "units_refunded": 0,
+        }
+        for spec in SKUS
+    }
+    for fact in sorted(facts, key=lambda f: f.natural_key):
+        row = totals.get(fact.payload.get("sku"))
+        if row is None:
+            continue
+        if fact.kind == "order":
+            row["gross"] += Decimal(fact.payload["amount"])
+            row["units_sold"] += int(fact.payload["qty"])
+        elif fact.kind == "refund":
+            row["refunds"] += Decimal(fact.payload["amount"])
+            row["units_refunded"] += int(fact.payload["qty"])
+    rows = [
+        {
+            "sku": row["sku"],
+            "name": row["name"],
+            "gross_revenue": str(row["gross"].quantize(
+                CENT, rounding=ROUND_HALF_UP)),
+            "refunds": str(row["refunds"].quantize(
+                CENT, rounding=ROUND_HALF_UP)),
+            "units_sold": row["units_sold"],
+            "units_refunded": row["units_refunded"],
+        }
+        for row in totals.values()
+    ]
+    return _classify_refunds(rows, pack)
 
 
 # -- the service ----------------------------------------------------------
@@ -380,10 +660,10 @@ class DiagnosisService:
     def diagnose_stockout(self) -> Artefact:
         ledger = self._head_ledger()
         facts = self._store.list_facts()
-        findings, no_data = _stockout_route1(ledger, facts)
+        findings, no_data = _stockout_route1(ledger, facts, DIAGNOSIS_PACK)
         problems = self._ledger_currency_problems(ledger)
         expected_findings, expected_no_data = _stockout_route2(
-            facts, date.fromisoformat(ledger.payload["as_of"])
+            facts, date.fromisoformat(ledger.payload["as_of"]), DIAGNOSIS_PACK
         )
         if canonical_json(findings) != canonical_json(expected_findings):
             problems.append("stockout_finding_mismatch")
@@ -407,9 +687,11 @@ class DiagnosisService:
     def diagnose_ad_decay(self) -> Artefact:
         ledger = self._head_ledger()
         facts = self._store.list_facts()
-        findings, unjudged = _decay_route1(ledger)
+        findings, unjudged = _decay_route1(ledger, DIAGNOSIS_PACK)
         problems = self._ledger_currency_problems(ledger)
-        expected_findings, expected_unjudged = _decay_route2(facts)
+        expected_findings, expected_unjudged = _decay_route2(
+            facts, DIAGNOSIS_PACK
+        )
         if canonical_json(findings) != canonical_json(expected_findings):
             problems.append("ad_decay_finding_mismatch")
         if canonical_json(unjudged) != canonical_json(expected_unjudged):
@@ -429,8 +711,68 @@ class DiagnosisService:
         }
         return self._store_findings(AD_DECAY_KIND, "DAD-", payload, ledger)
 
+    def diagnose_expenses(self) -> Artefact:
+        ledger = self._head_ledger()
+        facts = self._store.list_facts()
+        findings, informational, unjudged = _expense_route1(
+            facts, DIAGNOSIS_PACK
+        )
+        problems = self._ledger_currency_problems(ledger)
+        expected = _expense_route2(facts, DIAGNOSIS_PACK)
+        if canonical_json(findings) != canonical_json(expected[0]):
+            problems.append("expense_finding_mismatch")
+        if canonical_json(informational) != canonical_json(expected[1]):
+            problems.append("expense_informational_mismatch")
+        if canonical_json(unjudged) != canonical_json(expected[2]):
+            problems.append("expense_unjudged_mismatch")
+        if problems:
+            raise DiagnosisRefused(
+                self._refuse("expense_anomaly", ledger, problems)
+            )
+        payload = {
+            "diagnosis": "expense_anomaly",
+            "pack_version": DIAGNOSIS_PACK["version"],
+            "ledger_artefact_id": ledger.artefact_id,
+            "as_of": ledger.payload["as_of"],
+            "rules": DIAGNOSIS_PACK["expense_anomaly"],
+            "findings": findings,
+            "informational": informational,
+            "unjudged": unjudged,
+        }
+        return self._store_findings(EXPENSE_KIND, "DEA-", payload, ledger)
+
+    def diagnose_refunds(self) -> Artefact:
+        ledger = self._head_ledger()
+        facts = self._store.list_facts()
+        findings, unjudged = _refund_route1(ledger, DIAGNOSIS_PACK)
+        problems = self._ledger_currency_problems(ledger)
+        expected_findings, expected_unjudged = _refund_route2(
+            facts, DIAGNOSIS_PACK
+        )
+        if canonical_json(findings) != canonical_json(expected_findings):
+            problems.append("refund_finding_mismatch")
+        if canonical_json(unjudged) != canonical_json(expected_unjudged):
+            problems.append("refund_unjudged_mismatch")
+        if problems:
+            raise DiagnosisRefused(
+                self._refuse("refund_anomaly", ledger, problems)
+            )
+        payload = {
+            "diagnosis": "refund_anomaly",
+            "pack_version": DIAGNOSIS_PACK["version"],
+            "ledger_artefact_id": ledger.artefact_id,
+            "as_of": ledger.payload["as_of"],
+            "rules": DIAGNOSIS_PACK["refund_anomaly"],
+            "findings": findings,
+            "unjudged": unjudged,
+        }
+        return self._store_findings(REFUND_KIND, "DRA-", payload, ledger)
+
     def verify(self, artefact: Artefact) -> list[str]:
-        """Re-perform a stored finding set from the facts by route 2.
+        """Re-perform a stored finding set from the facts by route 2,
+        under the pack version the set was stamped with — a finding
+        set from an earlier pack version re-performs under its own
+        version's rules, not today's.
 
         A refusal artefact is a record of a refusal, not a finding
         set; it carries nothing to re-perform and verifies clean."""
@@ -440,21 +782,45 @@ class DiagnosisService:
         if ledger is None:
             return ["ledger_missing"]
         problems = self._ledger_currency_problems(ledger)
+        pack = _pack_for(artefact.payload.get("pack_version"))
+        if pack is None:
+            problems.append(
+                f"unknown_pack_version:{artefact.payload.get('pack_version')}"
+            )
+            return problems
         facts = self._store.list_facts()
         if artefact.kind == STOCKOUT_KIND:
             findings, no_data = _stockout_route2(
-                facts, date.fromisoformat(ledger.payload["as_of"])
+                facts, date.fromisoformat(ledger.payload["as_of"]), pack
             )
             if canonical_json(findings) != canonical_json(artefact.payload["findings"]):
                 problems.append("stockout_finding_mismatch")
             if canonical_json(no_data) != canonical_json(artefact.payload["no_data"]):
                 problems.append("stockout_no_data_mismatch")
         elif artefact.kind == AD_DECAY_KIND:
-            findings, unjudged = _decay_route2(facts)
+            findings, unjudged = _decay_route2(facts, pack)
             if canonical_json(findings) != canonical_json(artefact.payload["findings"]):
                 problems.append("ad_decay_finding_mismatch")
             if canonical_json(unjudged) != canonical_json(artefact.payload["unjudged"]):
                 problems.append("ad_decay_unjudged_mismatch")
+        elif artefact.kind == EXPENSE_KIND and "expense_anomaly" not in pack:
+            problems.append("pack_section_missing:expense_anomaly")
+        elif artefact.kind == REFUND_KIND and "refund_anomaly" not in pack:
+            problems.append("pack_section_missing:refund_anomaly")
+        elif artefact.kind == EXPENSE_KIND:
+            findings, informational, unjudged = _expense_route2(facts, pack)
+            if canonical_json(findings) != canonical_json(artefact.payload["findings"]):
+                problems.append("expense_finding_mismatch")
+            if canonical_json(informational) != canonical_json(artefact.payload["informational"]):
+                problems.append("expense_informational_mismatch")
+            if canonical_json(unjudged) != canonical_json(artefact.payload["unjudged"]):
+                problems.append("expense_unjudged_mismatch")
+        elif artefact.kind == REFUND_KIND:
+            findings, unjudged = _refund_route2(facts, pack)
+            if canonical_json(findings) != canonical_json(artefact.payload["findings"]):
+                problems.append("refund_finding_mismatch")
+            if canonical_json(unjudged) != canonical_json(artefact.payload["unjudged"]):
+                problems.append("refund_unjudged_mismatch")
         else:
             problems.append(f"not_a_diagnosis:{artefact.kind}")
         return problems
