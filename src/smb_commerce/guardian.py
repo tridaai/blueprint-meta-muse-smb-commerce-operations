@@ -481,6 +481,14 @@ class GuardianService:
         model_rules, reply, run_id = self._model_rules(draft, pack)
         rules = rules + model_rules
         blocking = [r["rule_id"] for r in rules if r["outcome"] == "block"]
+        fingerprint = hashlib.sha256(
+            f"{draft.artefact_id}:{draft_content_hash(draft)}"
+            f":{pack['version']}:{reply.call_id}"
+            f":{canonical_json(rules)}".encode("utf-8")
+        ).hexdigest()
+        for existing in self._store.list_artefacts(VERDICT_KIND):
+            if existing.input_fingerprint == fingerprint:
+                return existing
         previous = self.latest_verdict(draft.artefact_id)
         payload = {
             "draft_artefact_id": draft.artefact_id,
@@ -499,10 +507,6 @@ class GuardianService:
                 previous.artefact_id if previous is not None else None
             ),
         }
-        fingerprint = hashlib.sha256(
-            f"{draft.artefact_id}:{payload['draft_content_hash']}"
-            f":{pack['version']}:{reply.call_id}".encode("utf-8")
-        ).hexdigest()
         material = canonical_json({"payload": payload, "fp": fingerprint})
         artefact_id = (
             "GRV-" + hashlib.sha256(material.encode()).hexdigest()[:20]
