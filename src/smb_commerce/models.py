@@ -49,6 +49,11 @@ class EmailFlowPayload(BaseModel):
     name: str
     status: str = "active"
     steps: int = Field(gt=0)
+    # Per-step send delays in hours, when the platform's export
+    # carries them. The Hartwell export does not, so the field reads
+    # as None on its facts and the audit's delay rule grades nothing
+    # there — it grades only what a fact carries.
+    step_delays_hours: list[str] | None = None
 
 
 class ExpensePayload(BaseModel):

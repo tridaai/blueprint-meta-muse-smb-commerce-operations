@@ -1,4 +1,5 @@
-"""Diagnosis packs I and II: stockout, ad-decay, expense and refund.
+"""Diagnosis packs I, II and III: stockout, ad-decay, expense,
+refund — and the email-flow audit.
 
 Law 5 lives here. Every diagnosis reads the head ledger artefact's
 own figures (route 1) and is re-performed from the stored facts by a
@@ -9,11 +10,12 @@ the whole finding set: a refusal artefact is recorded and
 finding.
 
 The rules are data, in the packs below, versioned as packs. Pack
-``2026.10.2`` (the current ``DIAGNOSIS_PACK``) extends ``2026.10.1``
-with the expense and refund rules; the stockout and ad-decay sections
-are carried over unchanged, and the earlier pack is kept verbatim in
-``DIAGNOSIS_PACKS`` so a finding set stamped with its version still
-re-performs under its own version in ``verify``:
+``2026.10.2`` extends ``2026.10.1`` with the expense and refund rules;
+pack ``2026.10.3`` (the current ``DIAGNOSIS_PACK``) extends it with
+the email-flow audit. The carried sections are unchanged, and the
+earlier packs are kept verbatim in ``DIAGNOSIS_PACKS`` so a finding
+set stamped with its version still re-performs under its own version
+in ``verify``:
 
 - Stockout: velocity is gross units sold over the trailing window
   ending at the ledger's as-of date. A SKU whose cover days (from the
@@ -45,6 +47,23 @@ re-performs under its own version in ``verify``:
   judged only over at least the pack's minimum units sold. A SKU
   below the minimum reads as unjudged with the reason, never as a
   clean rate.
+- Email-flow audit: the pack states the catalogue of flows a store
+  of this kind is expected to run — the flows the generator's email
+  platform defines, plus the winback flow it never defined. A
+  catalogue flow with no definition is a missing finding; a defined
+  flow whose status is not active is a dormant finding, in its own
+  class; an active flow with fewer steps than the catalogue's
+  expected step shape is a step-shortfall finding; and where a flow
+  fact carries per-step delays, any delay beyond the pack's sanity
+  bar is a delay-breach finding. (The Hartwell facts carry no delay
+  or performance figures, so those rules grade only what a fact
+  carries.) A defined flow outside the catalogue is the store's own
+  business and is not graded. Defined-and-healthy flows are named
+  nowhere. For each missing or dormant flow the audit also emits a
+  draft flow proposal artefact — the catalogue's trigger, step shape
+  and delays, structure only, no copy — marked as a proposal: it
+  changes nothing, and the defined flows are byte-identical before
+  and after the audit runs.
 """
 
 from __future__ import annotations
@@ -75,7 +94,7 @@ DIAGNOSIS_PACK_V1 = {
     },
 }
 
-DIAGNOSIS_PACK = {
+DIAGNOSIS_PACK_V2 = {
     "version": "2026.10.2",
     "stockout": {
         "velocity_window_days": 28,
@@ -99,9 +118,77 @@ DIAGNOSIS_PACK = {
     },
 }
 
+# The email-flow catalogue: the flows a store of this kind is
+# expected to run. Five are the flows the generator's email platform
+# defines; the sixth, winback, is the planted absence. The expected
+# step shapes restate what the platform carries for the defined
+# flows, so on the Hartwell facts every defined flow grades healthy
+# and only the absence is named. The delays are the proposal shape a
+# draft for a missing or dormant flow would take — structure only.
+EMAIL_FLOW_CATALOGUE = [
+    {
+        "flow_key": "welcome_series", "name": "Welcome Series",
+        "trigger": "new_subscriber", "expected_steps": 3,
+        "step_delays_hours": ["0", "48", "96"],
+    },
+    {
+        "flow_key": "abandoned_cart", "name": "Abandoned Cart",
+        "trigger": "cart_abandoned", "expected_steps": 2,
+        "step_delays_hours": ["1", "24"],
+    },
+    {
+        "flow_key": "post_purchase", "name": "Post-Purchase",
+        "trigger": "order_placed", "expected_steps": 2,
+        "step_delays_hours": ["0", "168"],
+    },
+    {
+        "flow_key": "browse_abandonment", "name": "Browse Abandonment",
+        "trigger": "product_viewed_without_purchase", "expected_steps": 1,
+        "step_delays_hours": ["24"],
+    },
+    {
+        "flow_key": "replenishment", "name": "Replenishment Reminder",
+        "trigger": "consumable_replenishment_due", "expected_steps": 1,
+        "step_delays_hours": ["0"],
+    },
+    {
+        "flow_key": "winback", "name": "Winback",
+        "trigger": "customer_lapsed", "expected_steps": 2,
+        "step_delays_hours": ["0", "336"],
+    },
+]
+
+DIAGNOSIS_PACK = {
+    "version": "2026.10.3",
+    "stockout": {
+        "velocity_window_days": 28,
+        "max_cover_days": "24.00",
+    },
+    "ad_decay": {
+        "min_total_spend": "2600.00",
+        "min_weeks": 8,
+        "decay_flag_max_factor": "0.5000",
+        "steady_band_min_factor": "0.9000",
+    },
+    "expense_anomaly": {
+        "duplicate_window_days": 7,
+        "outlier_min_charges": 3,
+        "outlier_multiple": "3.00",
+        "new_vendor_threshold": "1000.00",
+    },
+    "refund_anomaly": {
+        "max_refund_rate": "0.040000",
+        "min_units_sold": 1000,
+    },
+    "email_flow_audit": {
+        "max_step_delay_hours": "720",
+        "catalogue": EMAIL_FLOW_CATALOGUE,
+    },
+}
+
 DIAGNOSIS_PACKS = {
     pack["version"]: pack
-    for pack in (DIAGNOSIS_PACK_V1, DIAGNOSIS_PACK)
+    for pack in (DIAGNOSIS_PACK_V1, DIAGNOSIS_PACK_V2, DIAGNOSIS_PACK)
 }
 
 
@@ -115,6 +202,8 @@ STOCKOUT_KIND = "diagnosis_stockout"
 AD_DECAY_KIND = "diagnosis_ad_decay"
 EXPENSE_KIND = "diagnosis_expense_anomaly"
 REFUND_KIND = "diagnosis_refund_anomaly"
+EMAIL_AUDIT_KIND = "diagnosis_email_flow_audit"
+PROPOSAL_KIND = "draft_flow_proposal"
 REFUSAL_KIND = "diagnosis_refusal"
 
 
@@ -578,6 +667,137 @@ def _refund_route2(facts: list[Fact], pack: dict) -> tuple[list, list]:
     return _classify_refunds(rows, pack)
 
 
+# -- email-flow audit -----------------------------------------------------
+
+
+def _catalogue_entry(pack: dict, flow_key: str) -> dict | None:
+    for entry in pack["email_flow_audit"]["catalogue"]:
+        if entry["flow_key"] == flow_key:
+            return entry
+    return None
+
+
+def _classify_email_audit(defined: dict[str, dict],
+                          pack: dict) -> list[dict]:
+    """Defined email flows against the pack's catalogue -> findings.
+
+    Shared shaping, as with the other diagnoses: the routes differ in
+    how the defined-flow map is derived, never in how it is judged.
+    A catalogue flow with no definition is missing; a defined flow
+    that is not active is dormant, in its own class, and is judged no
+    further this round; an active flow is graded on its step shape,
+    and on any per-step delays its fact carries. Healthy flows and
+    flows outside the catalogue produce no finding."""
+    rules = pack["email_flow_audit"]
+    delay_bar = Decimal(rules["max_step_delay_hours"])
+    findings = []
+    for entry in rules["catalogue"]:
+        key = entry["flow_key"]
+        flow = defined.get(key)
+        if flow is None:
+            findings.append({
+                "class": "missing_flow",
+                "flow_key": key,
+                "name": entry["name"],
+                "trigger": entry["trigger"],
+                "expected_steps": entry["expected_steps"],
+            })
+            continue
+        if flow["status"] != "active":
+            findings.append({
+                "class": "dormant_flow",
+                "flow_key": key,
+                "name": flow["name"],
+                "status": flow["status"],
+                "steps": flow["steps"],
+            })
+            continue
+        if int(flow["steps"]) < entry["expected_steps"]:
+            findings.append({
+                "class": "step_shortfall",
+                "flow_key": key,
+                "name": flow["name"],
+                "steps": flow["steps"],
+                "expected_steps": entry["expected_steps"],
+            })
+        for index, delay in enumerate(flow.get("step_delays_hours") or []):
+            if Decimal(delay) > delay_bar:
+                findings.append({
+                    "class": "delay_breach",
+                    "flow_key": key,
+                    "name": flow["name"],
+                    "step_index": index,
+                    "delay_hours": delay,
+                    "max_step_delay_hours": rules["max_step_delay_hours"],
+                })
+    findings.sort(key=lambda f: (f["flow_key"], f["class"]))
+    return findings
+
+
+def _email_route1(facts: list[Fact], pack: dict) -> list[dict]:
+    """From the email-flow facts in store order, keyed by flow."""
+    defined = {}
+    for fact in facts:
+        if fact.kind == "email_flow":
+            defined[fact.payload["flow_key"]] = fact.payload
+    return _classify_email_audit(defined, pack)
+
+
+def _email_route2(facts: list[Fact], pack: dict) -> list[dict]:
+    """From the email-flow facts in natural-key order, each payload
+    re-read field by field: a different derivation of the same map."""
+    defined = {}
+    for fact in sorted(facts, key=lambda f: f.natural_key):
+        if fact.kind != "email_flow":
+            continue
+        p = fact.payload
+        flow = {
+            "flow_key": p["flow_key"],
+            "name": p["name"],
+            "status": p["status"],
+            "steps": p["steps"],
+        }
+        if p.get("step_delays_hours") is not None:
+            flow["step_delays_hours"] = list(p["step_delays_hours"])
+        defined[p["flow_key"]] = flow
+    return _classify_email_audit(defined, pack)
+
+
+def _proposal_payload(finding: dict, pack: dict, audit_id: str) -> dict:
+    """The draft proposal for one missing or dormant flow: the
+    catalogue's structure for that flow — trigger, step count, step
+    delays — and nothing else. No copy is drafted this round; the
+    proposal is marked as one, and acting on it belongs to a later
+    approval round."""
+    entry = _catalogue_entry(pack, finding["flow_key"])
+    return {
+        "proposal_for": finding["class"],
+        "flow_key": entry["flow_key"],
+        "name": entry["name"],
+        "trigger": entry["trigger"],
+        "steps": entry["expected_steps"],
+        "step_delays_hours": list(entry["step_delays_hours"]),
+        "audit_artefact_id": audit_id,
+        "pack_version": pack["version"],
+        "status": "proposal",
+        "changes_nothing": True,
+    }
+
+
+def _proposal_artefact_id(payload: dict, fingerprint: str) -> str:
+    material = canonical_json({"payload": payload, "fp": fingerprint})
+    return "DFP-" + hashlib.sha256(material.encode()).hexdigest()[:20]
+
+
+def _proposal_descriptors(findings: list[dict]) -> list[dict]:
+    """Which findings earn a draft proposal, in findings order."""
+    return [
+        {"flow_key": f["flow_key"], "proposal_for": f["class"]}
+        for f in findings
+        if f["class"] in ("missing_flow", "dormant_flow")
+    ]
+
+
 # -- the service ----------------------------------------------------------
 
 
@@ -768,6 +988,56 @@ class DiagnosisService:
         }
         return self._store_findings(REFUND_KIND, "DRA-", payload, ledger)
 
+    def _store_proposal(self, payload: dict, fingerprint: str) -> Artefact:
+        artefact_id = _proposal_artefact_id(payload, fingerprint)
+        existing = self._store.get_artefact(artefact_id)
+        if existing is not None:
+            return existing
+        artefact = Artefact(
+            artefact_id=artefact_id, kind=PROPOSAL_KIND,
+            payload=payload, input_fingerprint=fingerprint,
+        )
+        self._store.insert_artefact(artefact)
+        return artefact
+
+    def audit_email_flows(self) -> Artefact:
+        """The email-flow audit. The findings are re-performed by
+        route 2 before anything is stored; then the audit artefact
+        and one draft proposal per missing or dormant flow land
+        together. The audit writes artefacts only — it never touches
+        a flow fact, so the defined flows are byte-identical before
+        and after it runs."""
+        ledger = self._head_ledger()
+        facts = self._store.list_facts()
+        findings = _email_route1(facts, DIAGNOSIS_PACK)
+        problems = self._ledger_currency_problems(ledger)
+        expected = _email_route2(facts, DIAGNOSIS_PACK)
+        if canonical_json(findings) != canonical_json(expected):
+            problems.append("email_audit_finding_mismatch")
+        if problems:
+            raise DiagnosisRefused(
+                self._refuse("email_flow_audit", ledger, problems)
+            )
+        payload = {
+            "diagnosis": "email_flow_audit",
+            "pack_version": DIAGNOSIS_PACK["version"],
+            "ledger_artefact_id": ledger.artefact_id,
+            "as_of": ledger.payload["as_of"],
+            "rules": DIAGNOSIS_PACK["email_flow_audit"],
+            "findings": findings,
+            "proposals": _proposal_descriptors(findings),
+        }
+        audit = self._store_findings(EMAIL_AUDIT_KIND, "DEF-", payload, ledger)
+        fingerprint = self._fingerprint(ledger)
+        for finding in findings:
+            if finding["class"] in ("missing_flow", "dormant_flow"):
+                self._store_proposal(
+                    _proposal_payload(finding, DIAGNOSIS_PACK,
+                                      audit.artefact_id),
+                    fingerprint,
+                )
+        return audit
+
     def verify(self, artefact: Artefact) -> list[str]:
         """Re-perform a stored finding set from the facts by route 2,
         under the pack version the set was stamped with — a finding
@@ -778,6 +1048,8 @@ class DiagnosisService:
         set; it carries nothing to re-perform and verifies clean."""
         if artefact.kind == REFUSAL_KIND:
             return []
+        if artefact.kind == PROPOSAL_KIND:
+            return self._verify_proposal(artefact)
         ledger = self._store.get_artefact(artefact.payload["ledger_artefact_id"])
         if ledger is None:
             return ["ledger_missing"]
@@ -821,6 +1093,53 @@ class DiagnosisService:
                 problems.append("refund_finding_mismatch")
             if canonical_json(unjudged) != canonical_json(artefact.payload["unjudged"]):
                 problems.append("refund_unjudged_mismatch")
+        elif artefact.kind == EMAIL_AUDIT_KIND and "email_flow_audit" not in pack:
+            problems.append("pack_section_missing:email_flow_audit")
+        elif artefact.kind == EMAIL_AUDIT_KIND:
+            findings = _email_route2(facts, pack)
+            if canonical_json(findings) != canonical_json(artefact.payload["findings"]):
+                problems.append("email_audit_finding_mismatch")
+            descriptors = _proposal_descriptors(findings)
+            if canonical_json(descriptors) != canonical_json(artefact.payload["proposals"]):
+                problems.append("email_audit_proposal_mismatch")
+            else:
+                for finding in findings:
+                    if finding["class"] not in ("missing_flow", "dormant_flow"):
+                        continue
+                    expected_payload = _proposal_payload(
+                        finding, pack, artefact.artefact_id)
+                    proposal_id = _proposal_artefact_id(
+                        expected_payload, artefact.input_fingerprint)
+                    stored = self._store.get_artefact(proposal_id)
+                    if stored is None:
+                        problems.append(
+                            f"email_audit_proposal_missing:{finding['flow_key']}")
+                    elif canonical_json(stored.payload) != canonical_json(expected_payload):
+                        problems.append(
+                            f"email_audit_proposal_mismatch:{finding['flow_key']}")
         else:
             problems.append(f"not_a_diagnosis:{artefact.kind}")
         return problems
+
+    def _verify_proposal(self, artefact: Artefact) -> list[str]:
+        """A draft proposal re-performs from the catalogue entry it
+        names, under the pack version it was stamped with, bound to
+        the audit artefact that emitted it."""
+        pack = _pack_for(artefact.payload.get("pack_version"))
+        if pack is None:
+            return [f"unknown_pack_version:{artefact.payload.get('pack_version')}"]
+        if "email_flow_audit" not in pack:
+            return ["pack_section_missing:email_flow_audit"]
+        audit = self._store.get_artefact(artefact.payload["audit_artefact_id"])
+        if audit is None:
+            return ["audit_missing"]
+        if _catalogue_entry(pack, artefact.payload["flow_key"]) is None:
+            return [f"unknown_flow:{artefact.payload['flow_key']}"]
+        finding = {
+            "class": artefact.payload["proposal_for"],
+            "flow_key": artefact.payload["flow_key"],
+        }
+        expected = _proposal_payload(finding, pack, audit.artefact_id)
+        if canonical_json(expected) != canonical_json(artefact.payload):
+            return [f"email_audit_proposal_mismatch:{artefact.payload['flow_key']}"]
+        return []
