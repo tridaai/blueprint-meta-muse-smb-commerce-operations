@@ -130,6 +130,36 @@ Zero-tolerance counters:
                                    cost the price table cannot
                                    re-perform, or a verdict whose
                                    stamped call does not reconcile
+  - approvals_without_passing_verdict
+                                   an approval recorded for a draft
+                                   with no passing guardian verdict
+                                   (blocked, unscreened, or already
+                                   rejected), or an approve attempt
+                                   on such a draft that was not
+                                   refused with the refusal recorded
+  - approvals_on_hash_mismatch ... an approval recorded against a
+                                   verdict whose hash differs from
+                                   the draft's current hash, a
+                                   forged approval act with a
+                                   mismatched hash that verify()
+                                   accepts or that the approved
+                                   list shows, or an approve
+                                   attempt against the forged
+                                   verdict that was not refused
+  - double_approvals_accepted .... a second approval act recorded
+                                   for a draft that already carries
+                                   one
+  - stale_approvals_shown_clean .. an approved entry whose bound
+                                   inputs have moved (a new ledger,
+                                   a superseded plan) that the
+                                   approved list shows as not stale,
+                                   or shows stale without naming a
+                                   moved input
+  - approved_shown_as_executed ... an approved draft or approval
+                                   act shown anywhere as sent,
+                                   executed or published, or without
+                                   the exact display status
+                                   "approved — not sent"
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -148,6 +178,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from smb_commerce import generator
+from smb_commerce.approvals import ApprovalRefused
 from smb_commerce.config import Settings, load_settings
 from smb_commerce.diagnosis import DIAGNOSIS_PACK
 from smb_commerce.drafting import DraftingService, DraftRefused
@@ -184,6 +215,9 @@ def main() -> int:
         "guardian_bypasses", "verdict_hash_mismatches_accepted",
         "guardian_hard_line_misses",
         "screening_cost_reconciliation_errors",
+        "approvals_without_passing_verdict",
+        "approvals_on_hash_mismatch", "double_approvals_accepted",
+        "stale_approvals_shown_clean", "approved_shown_as_executed",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -862,6 +896,156 @@ def main() -> int:
             e["draft_artefact_id"] for e in service.awaiting_approval()
         }:
             counters["guardian_bypasses"] += 1
+
+        # Approval queue (Round 8): the three clean drafts are
+        # approved by a named approver; every approved entry must
+        # read "approved — not sent" and start out not stale.
+        approval_acts = {}
+        for draft in drafts.values():
+            act = service.approve_draft(draft.artefact_id, "Maya Chen")
+            approval_acts[draft.artefact_id] = act
+            counters["approved_shown_as_executed"] += len(
+                service.approvals.verify(act))
+        approved_entries = {
+            e["draft_artefact_id"]: e
+            for e in service.approvals.approved()
+        }
+        if set(approved_entries) != set(approval_acts):
+            counters["approved_shown_as_executed"] += 1
+        for entry in approved_entries.values():
+            if (entry["display_status"] != "approved — not sent"
+                    or entry["execution_status"] != "not_sent"):
+                counters["approved_shown_as_executed"] += 1
+            if entry["stale"]:
+                counters["stale_approvals_shown_clean"] += 1
+        if service.approvals.awaiting():
+            counters["approvals_without_passing_verdict"] += 1
+
+        def _expect_refusal(draft_id, problems_expected, counter):
+            refusals_before = len(service.approvals.refusals())
+            try:
+                service.approve_draft(draft_id, "Maya Chen")
+                counters[counter] += 1
+                return
+            except ApprovalRefused as refused_error:
+                problems = refused_error.refusal.payload["problems"]
+                if not any(p in problems for p in problems_expected):
+                    counters[counter] += 1
+            if len(service.approvals.refusals()) <= refusals_before:
+                counters[counter] += 1
+
+        # A blocked draft (genuine blocking verdict) cannot be
+        # approved; an unscreened draft cannot be approved.
+        _expect_refusal(
+            fixture_drafts["discount_beyond_cap"].artefact_id,
+            ["guardian_verdict_not_passing"],
+            "approvals_without_passing_verdict")
+        _expect_refusal(
+            unscreened.artefact_id, ["no_guardian_verdict"],
+            "approvals_without_passing_verdict")
+        # The guaranteed-results fixture's latest verdict is the
+        # forged one from the guardian section: its hash names
+        # another draft, so approval must refuse on the hash.
+        _expect_refusal(
+            fixture_drafts["guaranteed_results_language"].artefact_id,
+            ["verdict_draft_hash_mismatch"],
+            "approvals_on_hash_mismatch")
+        # No double-approval: the narrative already carries one.
+        _expect_refusal(
+            drafts["plan_narrative"].artefact_id, ["already_approved"],
+            "double_approvals_accepted")
+        narrative_acts = [
+            a for a in service.store.list_artefacts("approval_act")
+            if a.payload["draft_artefact_id"]
+            == drafts["plan_narrative"].artefact_id
+        ]
+        if len(narrative_acts) != 1:
+            counters["double_approvals_accepted"] += 1
+
+        # A forged approval act — bound to a hash that is not the
+        # draft's — must fail verify() and never read as approved.
+        forged_approval = Artefact(
+            artefact_id="APR-forged0000000000000e",
+            kind="approval_act",
+            payload={
+                "action": "approve",
+                "draft_artefact_id": drafts["plan_narrative"].artefact_id,
+                "draft_kind": "plan_narrative",
+                "draft_content_hash": "0" * 64,
+                "verdict_artefact_id": (
+                    approval_acts[drafts["plan_narrative"].artefact_id]
+                    .payload["verdict_artefact_id"]),
+                "verdict_pack_version": "2026.10.1",
+                "approver": "Forger", "status": "approved",
+                "display_status": "approved — not sent",
+                "execution_status": "not_sent",
+                "bound_inputs": {
+                    "draft_content_hash": "0" * 64,
+                    "verdict_artefact_id": (
+                        approval_acts[drafts["plan_narrative"].artefact_id]
+                        .payload["verdict_artefact_id"]),
+                    "verdict_pack_version": "2026.10.1",
+                    "source_artefact_ids": [], "source_heads": {},
+                    "ledger_artefact_id": None,
+                },
+            },
+            input_fingerprint="forged",
+        )
+        service.store.insert_artefact(forged_approval)
+        if "approval_draft_hash_mismatch" not in service.approvals.verify(
+                forged_approval):
+            counters["approvals_on_hash_mismatch"] += 1
+        if any(e["approval_artefact_id"] == forged_approval.artefact_id
+               for e in service.approvals.approved()):
+            counters["approvals_on_hash_mismatch"] += 1
+
+        # Rejection: a fresh clean draft, screened and passing,
+        # is rejected with a stated reason; it leaves the queue,
+        # stays on the record, and cannot then be approved.
+        reject_draft = DraftingService(
+            service.store,
+            GovernedModelPort(
+                ProsePort("eval-rejection",
+                          "A quiet note on the decaying set, nothing"
+                          " more."),
+                service.store),
+        ).draft_ad_note()
+        service.screen_draft(reject_draft)
+        service.reject_draft(
+            reject_draft.artefact_id, "Maya Chen", "timing",
+            "Hold until the spring catalogue lands.")
+        if reject_draft.artefact_id not in {
+            e["draft_artefact_id"] for e in service.approvals.rejected()
+        } or reject_draft.artefact_id in {
+            e["draft_artefact_id"] for e in service.approvals.awaiting()
+        }:
+            counters["approvals_without_passing_verdict"] += 1
+        _expect_refusal(
+            reject_draft.artefact_id, ["already_rejected"],
+            "approvals_without_passing_verdict")
+
+        # Staleness: move the record under the approved
+        # narrative — a new ledger and a plan that supersedes
+        # the one it drafts from — and the approved entry must
+        # read STALE with the moved inputs named, never clean.
+        service.ingest.ingest(
+            kind="order", natural_key="order:EVAL-R8:2026-01-05",
+            payload={"order_id": "EVAL-R8",
+                     "sku": generator.FAST_MOVER_SKU,
+                     "date": "2026-01-05", "qty": 40,
+                     "unit_price": "64.00", "amount": "2560.00"},
+            source_system=generator.SOURCE_ORDERS, as_of="2026-01-05",
+        )
+        service.ledger.compute()
+        service.assemble_plan()
+        stale_entry = {
+            e["draft_artefact_id"]: e
+            for e in service.approvals.approved()
+        }[drafts["plan_narrative"].artefact_id]
+        if not stale_entry["stale"] or not stale_entry["moved_inputs"]:
+            counters["stale_approvals_shown_clean"] += 1
+        if stale_entry["display_status"] != "approved — not sent":
+            counters["approved_shown_as_executed"] += 1
 
         # Cost ledger: an offline call and a stubbed hosted call, each
         # re-performed against the price table, each tier-stamped.
