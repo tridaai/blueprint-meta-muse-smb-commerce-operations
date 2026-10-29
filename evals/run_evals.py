@@ -35,6 +35,25 @@ Zero-tolerance counters:
                                    a diagnosis verifier problem, or a
                                    planted figure in a finding that
                                    does not match the stated constants
+  - duplicate_false_positives .... a duplicate-charge finding the
+                                   planted truth does not name
+  - duplicate_false_negatives .... the planted PackShip pair not
+                                   named as a duplicate
+  - outlier_false_positives ...... an amount-outlier finding the
+                                   truth (dataset or fixture) does
+                                   not name
+  - outlier_false_negatives ...... the fixture's planted outlier not
+                                   named
+  - refund_anomaly_false_positives
+                                   a SKU named over the refund bar
+                                   that the planted truth does not name
+  - refund_anomaly_false_negatives
+                                   the planted Ceramic Vase rate not
+                                   named
+  - anomaly_reperformance_mismatches
+                                   a pack II verifier problem, or a
+                                   planted pack II figure that does
+                                   not match the hand-computed values
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -67,6 +86,10 @@ def main() -> int:
         "stockout_false_positives", "stockout_false_negatives",
         "ad_decay_false_positives", "ad_decay_false_negatives",
         "finding_reperformance_mismatches",
+        "duplicate_false_positives", "duplicate_false_negatives",
+        "outlier_false_positives", "outlier_false_negatives",
+        "refund_anomaly_false_positives", "refund_anomaly_false_negatives",
+        "anomaly_reperformance_mismatches",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -184,6 +207,105 @@ def main() -> int:
                     and finding["latest_week_roas"] == "0.1704"
                     and finding["decay_factor"] == "0.0426"):
                 counters["finding_reperformance_mismatches"] += 1
+
+        # Diagnosis pack II: the named anomalies must equal the
+        # hand-computed truth exactly. Expenses: one duplicate pair
+        # (PackShip Co $349.00, 2025-11-14 + 2025-11-15), no outliers
+        # (every vendor's median equals its constant charge), two
+        # informational first charges over $1,000.00. Refunds: only
+        # the Ceramic Vase — $9,568.00 over $191,360.00 is 0.050000,
+        # over the 0.040000 bar.
+        expenses = service.diagnose_expenses()
+        counters["anomaly_reperformance_mismatches"] += len(
+            service.diagnosis.verify(expenses))
+        duplicates = {
+            (f["vendor"], f["amount"], tuple(f["dates"]))
+            for f in expenses.payload["findings"]
+            if f["class"] == "duplicate_charge"
+        }
+        expected_duplicates = {
+            (generator.DUPLICATE_VENDOR, "349.00",
+             ("2025-11-14", "2025-11-15")),
+        }
+        counters["duplicate_false_positives"] += len(
+            duplicates - expected_duplicates)
+        counters["duplicate_false_negatives"] += len(
+            expected_duplicates - duplicates)
+        dataset_outliers = {
+            (f["vendor"], f["amount"])
+            for f in expenses.payload["findings"]
+            if f["class"] == "amount_outlier"
+        }
+        counters["outlier_false_positives"] += len(dataset_outliers)
+        informational = {
+            (e["vendor"], e["amount"])
+            for e in expenses.payload["informational"]
+        }
+        if informational != {("Hartwell Studio Lease", "2400.00"),
+                             ("Northgate Logistics", "1250.00")}:
+            counters["anomaly_reperformance_mismatches"] += 1
+        if expenses.payload["unjudged"]:
+            counters["anomaly_reperformance_mismatches"] += 1
+        refund_anomalies = service.diagnose_refunds()
+        counters["anomaly_reperformance_mismatches"] += len(
+            service.diagnosis.verify(refund_anomalies))
+        named_refunds = {f["sku"] for f in refund_anomalies.payload["findings"]}
+        expected_refunds = {"HW-VAS-004"}
+        counters["refund_anomaly_false_positives"] += len(
+            named_refunds - expected_refunds)
+        counters["refund_anomaly_false_negatives"] += len(
+            expected_refunds - named_refunds)
+        if named_refunds == expected_refunds:
+            finding = refund_anomalies.payload["findings"][0]
+            if not (finding["refund_rate"] == "0.050000"
+                    and finding["refunds"] == "9568.00"
+                    and finding["gross_revenue"] == "191360.00"
+                    and finding["units_sold"] == 2080
+                    and finding["units_refunded"] == 104):
+                counters["anomaly_reperformance_mismatches"] += 1
+        if refund_anomalies.payload["unjudged"]:
+            counters["anomaly_reperformance_mismatches"] += 1
+
+        # Outlier grading needs a planted outlier, which the dataset
+        # deliberately lacks: a fixture store where PrintWorks bills
+        # $100.00 four times and $950.00 once — median $100.00, so
+        # $950.00 is the one outlier the pack must name.
+        fixture_settings = Settings(
+            database_url="", sqlite_path=tmp_path / "fixture.db",
+            migrations_dir=base.migrations_dir,
+            object_dir=tmp_path / "fixture-objects",
+            s3_endpoint="", s3_bucket=base.s3_bucket,
+            model_profile="offline", model_tier="standard",
+            log_level="WARNING",
+        )
+        fixture = CommerceService(fixture_settings)
+        fixture_items = [
+            {"kind": "expense",
+             "natural_key": f"expense:PrintWorks:{day}:{amount}",
+             "payload": {"vendor": "PrintWorks", "date": day,
+                         "category": "ops", "amount": amount},
+             "source_system": generator.SOURCE_FINANCE, "as_of": day}
+            for day, amount in (
+                ("2025-01-05", "100.00"), ("2025-02-05", "100.00"),
+                ("2025-03-05", "100.00"), ("2025-04-05", "100.00"),
+                ("2025-05-05", "950.00"),
+            )
+        ]
+        fixture.ingest.ingest_many(fixture_items)
+        fixture.ledger.compute()
+        fixture_expenses = fixture.diagnose_expenses()
+        counters["anomaly_reperformance_mismatches"] += len(
+            fixture.diagnosis.verify(fixture_expenses))
+        fixture_outliers = {
+            (f["vendor"], f["amount"])
+            for f in fixture_expenses.payload["findings"]
+            if f["class"] == "amount_outlier"
+        }
+        expected_outliers = {("PrintWorks", "950.00")}
+        counters["outlier_false_positives"] += len(
+            fixture_outliers - expected_outliers)
+        counters["outlier_false_negatives"] += len(
+            expected_outliers - fixture_outliers)
 
         # Cost ledger: an offline call and a stubbed hosted call, each
         # re-performed against the price table, each tier-stamped.
