@@ -98,11 +98,41 @@ def main() -> int:
         for entry in dp["unjudged"]:
             print(f"  UNJUDGED {entry['ad_set']} {entry['reason']}")
 
-        print("\n== Expense facts — PackShip Co at $349.00 ==")
-        for fact in service.store.list_facts("expense"):
-            if fact.payload["vendor"] == generator.DUPLICATE_VENDOR:
-                print(f"  {fact.payload['date']}  {fact.payload['vendor']}"
-                      f"  {fact.payload['amount']}  ({fact.fact_id})")
+        print("\n== Diagnosis packs II — expense and refund anomalies ==")
+        expenses = service.diagnose_expenses()
+        ep = expenses.payload
+        print(f"  expenses {expenses.artefact_id}  pack {ep['pack_version']}"
+              f"  verified {not service.diagnosis.verify(expenses)}")
+        for finding in ep["findings"]:
+            if finding["class"] == "duplicate_charge":
+                print(f"  DUPLICATE {finding['vendor']} {finding['amount']}"
+                      f" on {finding['dates'][0]} + {finding['dates'][1]}"
+                      f"  gap {finding['gap_days']}d"
+                      f"  facts {finding['fact_ids'][0]},"
+                      f" {finding['fact_ids'][1]}")
+            else:
+                print(f"  OUTLIER {finding['vendor']} {finding['amount']}"
+                      f" on {finding['date']}"
+                      f"  median {finding['vendor_median']}"
+                      f" x{finding['multiple']}")
+        for entry in ep["informational"]:
+            print(f"  NEW-VENDOR {entry['vendor']}"
+                  f" first charge {entry['amount']} on {entry['date']}"
+                  f"  over threshold {entry['threshold']}")
+        for entry in ep["unjudged"]:
+            print(f"  UNJUDGED {entry['vendor']} {entry['reason']}")
+        refunds = service.diagnose_refunds()
+        rp = refunds.payload
+        print(f"  refunds {refunds.artefact_id}  pack {rp['pack_version']}"
+              f"  verified {not service.diagnosis.verify(refunds)}")
+        for finding in rp["findings"]:
+            print(f"  REFUND {finding['sku']} {finding['name']}"
+                  f"  rate {finding['refund_rate']}"
+                  f" over bar {finding['max_refund_rate']}"
+                  f"  refunds {finding['refunds']}"
+                  f" of gross {finding['gross_revenue']}")
+        for entry in rp["unjudged"]:
+            print(f"  UNJUDGED {entry['sku']} {entry['reason']}")
 
         print("\n== Email flows defined on the platform ==")
         defined = [f.payload["flow_key"]
