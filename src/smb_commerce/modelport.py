@@ -217,6 +217,56 @@ def compose_draft_reply(prompt: str) -> str | None:
     return json.dumps(document, sort_keys=True)
 
 
+SCREEN_REQUEST_PREFIX = "SCREEN-REQUEST "
+SCREEN_SHEET_PREFIX = "SCREEN-SHEET "
+
+
+def _screen_sheet(prompt: str) -> dict | None:
+    """The screen sheet of a guardian screening request, or None
+    when the prompt is not one. A screening request's first line
+    names the draft; its second line carries the sheet as JSON —
+    the draft's texts and the guardian pack's judgement rules."""
+    lines = prompt.splitlines()
+    if len(lines) < 2 or not lines[0].startswith(SCREEN_REQUEST_PREFIX):
+        return None
+    if not lines[1].startswith(SCREEN_SHEET_PREFIX):
+        return None
+    try:
+        sheet = json.loads(lines[1][len(SCREEN_SHEET_PREFIX):])
+    except json.JSONDecodeError:
+        return None
+    return sheet if isinstance(sheet, dict) else None
+
+
+def compose_screen_reply(prompt: str) -> str | None:
+    """Compose a screening-contract reply deterministically — the
+    offline profile's half of the guardian contract (Round 7).
+
+    The sheet carries the pack's judgement rules with their stated
+    phrase lists; the offline screener blocks a rule when any of
+    its phrases appears in the draft's texts, and passes it
+    otherwise. A hosted profile judges the same rules on their
+    merits and answers the same contract: one JSON document,
+    ``{"rules": [{"rule_id": ..., "outcome": ...}, ...]}`` with an
+    entry per judgement rule in the sheet."""
+    sheet = _screen_sheet(prompt)
+    if sheet is None:
+        return None
+    texts = [str(text).lower() for text in sheet.get("texts", [])]
+    rules = []
+    for rule in sheet.get("judgement_rules", []):
+        blocked = any(
+            phrase.lower() in text
+            for phrase in rule.get("phrases", [])
+            for text in texts
+        )
+        rules.append({
+            "rule_id": rule["rule_id"],
+            "outcome": "block" if blocked else "pass",
+        })
+    return json.dumps({"rules": rules}, sort_keys=True)
+
+
 class OfflineModelPort:
     """Deterministic offline composer.
 
@@ -236,6 +286,8 @@ class OfflineModelPort:
 
     def complete(self, system: str, prompt: str) -> ModelReply:
         text = compose_draft_reply(prompt)
+        if text is None:
+            text = compose_screen_reply(prompt)
         if text is None:
             text = " ".join(prompt.split())[:280]
         return ModelReply(
