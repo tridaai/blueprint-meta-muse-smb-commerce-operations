@@ -12,6 +12,7 @@ import logging
 from . import generator
 from .config import Settings, load_settings
 from .diagnosis import DiagnosisService
+from .drafting import DraftingService
 from .ingest import IngestPort, IngestReport
 from .ledger import LedgerService
 from .modelport import GovernedModelPort, build_model_port
@@ -38,6 +39,7 @@ class CommerceService:
         self.diagnosis = DiagnosisService(self.store)
         self.plan = PlanService(self.store)
         self.model: GovernedModelPort = build_model_port(self.settings, self.store)
+        self.drafting = DraftingService(self.store, self.model)
         self.objects: ObjectStore = build_object_store(self.settings)
 
     # -- dataset ---------------------------------------------------------
@@ -83,3 +85,16 @@ class CommerceService:
     # -- model -------------------------------------------------------------
     def draft(self, run_id: str, system: str, prompt: str):
         return self.model.complete(run_id, system, prompt)
+
+    # -- drafting ------------------------------------------------------------
+    def draft_plan_narrative(self):
+        return self.drafting.draft_plan_narrative()
+
+    def draft_email_copy(self, proposal):
+        return self.drafting.draft_email_copy(proposal)
+
+    def draft_ad_note(self):
+        return self.drafting.draft_ad_note()
+
+    def draft_all(self):
+        return self.drafting.draft_all()

@@ -2,12 +2,15 @@
 
 Commands: generate, facts, ledger, verify, diagnose,
 diagnose-verify, refusals, plan, plan-verify, plan-refusals,
-model-calls. The diagnose commands cover all five diagnoses
-(stockout, ad decay, expense anomalies, refund anomalies, and the
-email-flow audit); the plan commands assemble the growth plan from
-the computed record and re-verify it. Output is plain text sized
-for a terminal; figures come from the ledger artefact, never
-recomputed on the fly by the CLI itself.
+draft, drafts, drafts-verify, draft-refusals, model-calls. The
+diagnose commands cover all five diagnoses (stockout, ad decay,
+expense anomalies, refund anomalies, and the email-flow audit);
+the plan commands assemble the growth plan from the computed
+record and re-verify it; the draft commands run the governed
+drafting pass over the plan and read its drafts and refusals.
+Output is plain text sized for a terminal; figures come from
+the ledger artefact, never recomputed on the fly by the CLI
+itself.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import json
 import sys
 
 from .diagnosis import DiagnosisRefused
+from .drafting import DRAFT_KINDS, DraftRefused
 from .plan import PlanRefused
 from .service import CommerceService
 
@@ -145,12 +149,31 @@ def _print_plan(artefact) -> None:
               f" performed {action['performed']}")
 
 
+def _print_draft(artefact) -> None:
+    p = artefact.payload
+    print(f"DRAFT {p['draft_kind']} {artefact.artefact_id}"
+          f" status {p['status']} profile {p['model_profile']}"
+          f" tier {p['tier']} call {p['model_call_id']}"
+          f" sources {', '.join(p['source_artefact_ids'])}")
+    content = p["content"]
+    if "prose" in content:
+        for line in content["prose"].splitlines():
+            print(f"  {line}")
+    for index, step in enumerate(content.get("steps", []), start=1):
+        print(f"  step {index} subject: {step['subject']}")
+        print(f"  step {index} body: {step['body']}")
+    for claim in p["claims"]:
+        print(f"  figure {claim['value']} from"
+              f" {claim['source_artefact_id']} {claim['source_field']}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="smb-commerce")
     parser.add_argument("command", choices=[
         "generate", "facts", "ledger", "verify", "diagnose",
         "diagnose-verify", "refusals", "plan", "plan-verify",
-        "plan-refusals", "model-calls"])
+        "plan-refusals", "draft", "drafts", "drafts-verify",
+        "draft-refusals", "model-calls"])
     parser.add_argument("--kind", default=None)
     parser.add_argument("--run-id", default=None)
     args = parser.parse_args(argv)
@@ -240,6 +263,48 @@ def main(argv: list[str] | None = None) -> int:
                   f" pack {refusal.payload['pack_version']}:"
                   f" {', '.join(refusal.payload['problems'])}")
         print(f"{len(refusals)} plan refusals")
+        return 0
+    if args.command == "draft":
+        try:
+            drafts = service.draft_all()
+        except DraftRefused as refused:
+            print(f"REFUSED {refused.refusal.artefact_id}"
+                  f" {refused.refusal.payload['draft_kind']}:"
+                  f" {', '.join(refused.refusal.payload['problems'])}")
+            return 1
+        for draft in drafts.values():
+            _print_draft(draft)
+        return 0
+    if args.command == "drafts":
+        count = 0
+        for kind in DRAFT_KINDS:
+            for draft in service.store.list_artefacts(kind):
+                _print_draft(draft)
+                count += 1
+        print(f"{count} drafts")
+        return 0
+    if args.command == "drafts-verify":
+        status = 0
+        for kind in DRAFT_KINDS:
+            artefact = service.store.latest_artefact(kind)
+            if artefact is None:
+                print(json.dumps({"kind": kind, "verified": False,
+                                  "problems": ["not_drafted"]}))
+                status = 1
+                continue
+            problems = service.drafting.verify(artefact)
+            print(json.dumps({"artefact_id": artefact.artefact_id,
+                              "verified": not problems,
+                              "problems": problems}))
+            status = status or (1 if problems else 0)
+        return status
+    if args.command == "draft-refusals":
+        refusals = service.store.list_artefacts("draft_refusal")
+        for refusal in refusals:
+            print(f"{refusal.artefact_id}"
+                  f" {refusal.payload['draft_kind']}:"
+                  f" {', '.join(refusal.payload['problems'])}")
+        print(f"{len(refusals)} draft refusals")
         return 0
     if args.command == "model-calls":
         calls = service.store.list_model_calls(args.run_id)

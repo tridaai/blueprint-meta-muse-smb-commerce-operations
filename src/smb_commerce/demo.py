@@ -200,6 +200,42 @@ def main() -> int:
                       f" (proposed, not performed)")
         print(f"  the plan performs actions: {pp['performs_actions']}")
 
+        print("\n== Drafting — the model writes, the figures are checked ==")
+        drafts = service.draft_all()
+        narrative = drafts["plan_narrative"]
+        np_ = narrative.payload
+        print(f"  narrative {narrative.artefact_id}  status {np_['status']}"
+              f"  profile {np_['model_profile']}  tier {np_['tier']}"
+              f"  verified {not service.drafting.verify(narrative)}")
+        for line in np_["content"]["prose"].splitlines():
+            print(f"    {line}")
+        copy = drafts["winback_email_copy"]
+        cp = copy.payload
+        print(f"  winback copy {copy.artefact_id}  status {cp['status']}"
+              f"  for proposal {cp['source_bindings']['proposal']}"
+              f"  verified {not service.drafting.verify(copy)}")
+        for index, step in enumerate(cp["content"]["steps"], start=1):
+            print(f"    step {index} subject: {step['subject']}")
+            print(f"    step {index} body: {step['body']}")
+        note = drafts["ad_budget_note"]
+        ap2 = note.payload
+        print(f"  budget note {note.artefact_id}  status {ap2['status']}"
+              f"  verified {not service.drafting.verify(note)}")
+        for line in ap2["content"]["prose"].splitlines():
+            print(f"    {line}")
+        drafting_calls = [
+            call for draft in drafts.values()
+            for call in service.store.list_model_calls(
+                draft.payload["run_id"])
+        ]
+        drafting_total = sum(
+            (call.cost for call in drafting_calls), Decimal("0")
+        )
+        print(f"  drafting calls recorded {len(drafting_calls)}"
+              f"  drafting run total ${drafting_total}"
+              f"  every draft a draft — nothing approved, sent or"
+              f" published")
+
         print("\n== Model port (offline profile, governed) ==")
         reply = service.draft(
             "demo-run",

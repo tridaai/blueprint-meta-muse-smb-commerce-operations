@@ -2,8 +2,9 @@
 
 The spine never changes shape — only its nodes grow: ingest the
 dataset, compute the ledger, run the diagnosis packs, assemble the
-growth plan, verify everything. Later rounds hang drafting, the
-guardian screen and the approval queue on these same nodes.
+growth plan, draft over it through the governed model port, verify
+everything. Later rounds hang the guardian screen and the approval
+queue on these same nodes.
 
 State is a plain dict of counts and artefact ids, never figures: the
 figures live in the artefacts, and nodes pass references.
@@ -34,6 +35,9 @@ class LoopState(TypedDict, total=False):
     email_audit_findings: int
     plan_artefact_id: str
     plan_priorities: int
+    narrative_draft_id: str
+    email_copy_draft_id: str
+    ad_note_draft_id: str
     verify_problems: list[str]
 
 
@@ -77,6 +81,14 @@ def build_graph(service: CommerceService):
             "plan_priorities": len(ranked),
         }
 
+    def draft_node(state: LoopState) -> LoopState:
+        drafts = service.draft_all()
+        return {
+            "narrative_draft_id": drafts["plan_narrative"].artefact_id,
+            "email_copy_draft_id": drafts["winback_email_copy"].artefact_id,
+            "ad_note_draft_id": drafts["ad_budget_note"].artefact_id,
+        }
+
     def verify_node(state: LoopState) -> LoopState:
         problems: list[str] = []
         artefact = service.store.get_artefact(state["ledger_artefact_id"])
@@ -94,6 +106,13 @@ def build_graph(service: CommerceService):
             problems.append("missing")
         else:
             problems += service.plan.verify(plan)
+        for key in ("narrative_draft_id", "email_copy_draft_id",
+                    "ad_note_draft_id"):
+            draft = service.store.get_artefact(state[key])
+            if draft is None:
+                problems.append("missing")
+            else:
+                problems += service.drafting.verify(draft)
         return {"verify_problems": problems}
 
     graph = StateGraph(LoopState)
@@ -101,11 +120,13 @@ def build_graph(service: CommerceService):
     graph.add_node("ledger", ledger_node)
     graph.add_node("diagnose", diagnose_node)
     graph.add_node("plan", plan_node)
+    graph.add_node("draft", draft_node)
     graph.add_node("verify", verify_node)
     graph.add_edge(START, "ingest")
     graph.add_edge("ingest", "ledger")
     graph.add_edge("ledger", "diagnose")
     graph.add_edge("diagnose", "plan")
-    graph.add_edge("plan", "verify")
+    graph.add_edge("plan", "draft")
+    graph.add_edge("draft", "verify")
     graph.add_edge("verify", END)
     return graph.compile()

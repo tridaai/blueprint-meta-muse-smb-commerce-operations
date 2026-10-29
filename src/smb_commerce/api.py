@@ -224,6 +224,80 @@ def list_plan_refusals() -> dict:
             "refusals": [r.model_dump() for r in refusals]}
 
 
+_DRAFT_KINDS = {
+    "plan-narrative": "draft_plan_narrative",
+    "winback-copy": "draft_email_copy",
+    "ad-budget-note": "draft_ad_note",
+}
+
+
+@app.get("/drafts")
+def list_drafts() -> dict:
+    service = get_service()
+    drafts = [
+        draft.model_dump()
+        for kind in _DRAFT_KINDS.values()
+        for draft in service.store.list_artefacts(kind)
+    ]
+    return {"count": len(drafts), "drafts": drafts}
+
+
+def _latest_draft(slug: str) -> dict:
+    service = get_service()
+    artefact = service.store.latest_artefact(_DRAFT_KINDS[slug])
+    if artefact is None:
+        raise HTTPException(status_code=404, detail="no draft yet")
+    return artefact.model_dump()
+
+
+def _verify_draft(slug: str) -> dict:
+    service = get_service()
+    artefact = service.store.latest_artefact(_DRAFT_KINDS[slug])
+    if artefact is None:
+        raise HTTPException(status_code=404, detail="no draft yet")
+    problems = service.drafting.verify(artefact)
+    return {"artefact_id": artefact.artefact_id, "verified": not problems,
+            "problems": problems}
+
+
+@app.get("/drafts/plan-narrative")
+def latest_narrative() -> dict:
+    return _latest_draft("plan-narrative")
+
+
+@app.get("/drafts/plan-narrative/verify")
+def verify_narrative() -> dict:
+    return _verify_draft("plan-narrative")
+
+
+@app.get("/drafts/winback-copy")
+def latest_winback_copy() -> dict:
+    return _latest_draft("winback-copy")
+
+
+@app.get("/drafts/winback-copy/verify")
+def verify_winback_copy() -> dict:
+    return _verify_draft("winback-copy")
+
+
+@app.get("/drafts/ad-budget-note")
+def latest_ad_note() -> dict:
+    return _latest_draft("ad-budget-note")
+
+
+@app.get("/drafts/ad-budget-note/verify")
+def verify_ad_note() -> dict:
+    return _verify_draft("ad-budget-note")
+
+
+@app.get("/drafts/refusals")
+def list_draft_refusals() -> dict:
+    service = get_service()
+    refusals = service.store.list_artefacts("draft_refusal")
+    return {"count": len(refusals),
+            "refusals": [r.model_dump() for r in refusals]}
+
+
 @app.get("/model-calls")
 def list_model_calls(run_id: str | None = None) -> dict:
     service = get_service()
