@@ -16,6 +16,7 @@ from .ingest import IngestPort, IngestReport
 from .ledger import LedgerService
 from .modelport import GovernedModelPort, build_model_port
 from .objectstore import ObjectStore, build_object_store
+from .plan import PlanService
 from .store import SqlStore
 
 log = logging.getLogger("smb_commerce.service")
@@ -35,6 +36,7 @@ class CommerceService:
         self.ingest = IngestPort(self.store)
         self.ledger = LedgerService(self.store)
         self.diagnosis = DiagnosisService(self.store)
+        self.plan = PlanService(self.store)
         self.model: GovernedModelPort = build_model_port(self.settings, self.store)
         self.objects: ObjectStore = build_object_store(self.settings)
 
@@ -73,6 +75,10 @@ class CommerceService:
 
     def audit_email_flows(self):
         return self.diagnosis.audit_email_flows()
+
+    # -- plan --------------------------------------------------------------
+    def assemble_plan(self):
+        return self.plan.assemble()
 
     # -- model -------------------------------------------------------------
     def draft(self, run_id: str, system: str, prompt: str):
