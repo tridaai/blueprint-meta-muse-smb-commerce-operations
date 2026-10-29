@@ -42,7 +42,13 @@ No key is needed for any of the above. The default model profile is a determinis
 - **Re-performance before existence.** Each diagnosis is computed from the head ledger artefact's figures and re-performed from the stored facts by a second route before the finding set is stored. One wrong figure — or a ledger that no longer matches the fact set, down to a fact edited behind the store's back — refuses the whole set: a refusal artefact is recorded and no finding is stored. A stored finding set can be re-verified at any time through the same second route.
 - **Surfaces.** The LangGraph loop gains a diagnose node between compute and verify. FastAPI reads (`/diagnosis/stockout`, `/diagnosis/ad-decay`, their `/verify` companions, `/diagnosis/refusals`), CLI commands (`diagnose`, `diagnose-verify`, `refusals`), and the demo walks both diagnoses right after the ledger.
 
-The expense and refund anomaly pack, the email-flow audit, drafting, the guardian screen and the approval queue are the next rounds on the map in `docs/architecture.md`.
+## What Round 3 builds
+
+- **Diagnosis pack II (Law 5).** The pack moves to `2026.10.2`, adding expense and refund rules; the pack I sections carry over unchanged and the `2026.10.1` pack is kept verbatim, so a finding set stamped with the earlier version still re-performs under its own version. Expense bars: an exact duplicate is the same vendor charging the same amount again within 7 days; an amount outlier is a charge above 3.00x that vendor's own median charge (a vendor with fewer than 3 charges is unjudged for outliers, with the reason named); a vendor's first charge above $1,000.00 is named as informational, in its own class. Refund bar: a SKU's refund rate — refund amounts over gross revenue, from the ledger's per-SKU figures — above 0.040000, judged only over at least 1,000 units sold; below that a SKU reads as unjudged, never as clean.
+- **Findings as artefacts (Law 4).** The expense diagnosis names the planted duplicate: PackShip Co, $349.00 on 2025-11-14 and again on 2025-11-15, both fact ids on the finding's face. No charge clears 3x its vendor's median (every vendor bills a constant amount), so there are no outliers; the Studio Lease ($2,400.00) and Northgate Logistics ($1,250.00) first charges are named as informational only. The refund diagnosis names the Ceramic Vase: $9,568.00 refunded against $191,360.00 gross — a rate of exactly 0.050000. Every other SKU sits under the bar and is named nowhere.
+- **Re-performance before existence, again.** Both new diagnoses run under the same discipline as pack I: computed one way, re-performed from the stored facts by a second route before the finding set may exist; a mismatch — or a ledger gone stale against the fact set — records a refusal artefact and stores no finding. The CLI diagnose commands and the demo now walk all four packs.
+
+The email-flow audit, drafting, the guardian screen and the approval queue are the next rounds on the map in `docs/architecture.md`.
 
 ## The laws
 
@@ -55,7 +61,7 @@ The expense and refund anomaly pack, the email-flow audit, drafting, the guardia
 
 ## Honest status
 
-- Round 2 of 20 is built: foundation plus diagnosis packs I. The agent diagnoses stockout risk and ad decay from the ledger, with every finding re-performed before it may exist; it does not yet flag expense anomalies or audit email flows (Rounds 3–4), and it does not draft, screen or approve anything (Rounds 5–8).
+- Round 3 of 20 is built: foundation plus diagnosis packs I and II. The agent diagnoses stockout risk, ad decay, expense anomalies and refund anomalies, with every finding re-performed before it may exist; it does not yet audit email flows (Round 4), and it does not draft, screen or approve anything (Rounds 5–8).
 - The vendor systems (storefront, ads manager, email platform, books) are local doubles behind the ingest port's contracts; no real store, ad account or mailbox is connected.
 - The hosted `meta-muse` profile is stub-tested against a local double of the Meta Model API shape. No real API call has been made — there is no key in hand yet — and the model identifier is the configurable default `muse-spark` from `.env.example`; confirm the current identifier at dev.meta.ai before a live run.
 - Approval is the end of the line by design: the blueprint never executes against real systems, even in later rounds.

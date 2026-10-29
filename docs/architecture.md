@@ -50,8 +50,14 @@ Every surface — API, CLI, demo, graph — talks to one
   disagreement, not a formatting one. The artefact id is a hash of the
   payload plus the fingerprint of the fact set, so the same facts
   always produce the same artefact and different facts never do.
-- **Diagnosis** (`diagnosis.py`): pack I — stockout risk and ad
-  decay — with the rules held as data in a versioned pack. Route 1
+- **Diagnosis** (`diagnosis.py`): packs I and II — stockout risk,
+  ad decay, expense anomalies and refund anomalies — with the rules
+  held as data in versioned packs. The current pack is `2026.10.2`;
+  `2026.10.1` is kept verbatim in the registry, and verification
+  re-performs a finding set under the version it was stamped with.
+  Expense findings name the fact ids they rest on (a duplicate names
+  both charges); refund findings restate the ledger's per-SKU
+  figures they were judged from. Route 1
   reads the head ledger artefact's own figures; route 2 re-derives
   the same inputs from the facts by grouped accumulation in key
   order. Both routes share only the classification shaping, so a
