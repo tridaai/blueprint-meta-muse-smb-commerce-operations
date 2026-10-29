@@ -298,6 +298,39 @@ def list_draft_refusals() -> dict:
             "refusals": [r.model_dump() for r in refusals]}
 
 
+@app.get("/guardian/verdicts")
+def list_verdicts() -> dict:
+    service = get_service()
+    verdicts = service.store.list_artefacts("guardian_verdict")
+    return {"count": len(verdicts),
+            "verdicts": [v.model_dump() for v in verdicts]}
+
+
+@app.get("/guardian/verdicts/{verdict_id}/verify")
+def verify_verdict(verdict_id: str) -> dict:
+    service = get_service()
+    verdict = service.store.get_artefact(verdict_id)
+    if verdict is None or verdict.kind != "guardian_verdict":
+        raise HTTPException(status_code=404, detail="verdict not found")
+    problems = service.guardian.verify(verdict)
+    return {"artefact_id": verdict.artefact_id, "verified": not problems,
+            "problems": problems}
+
+
+@app.get("/guardian/awaiting-approval")
+def awaiting_approval() -> dict:
+    service = get_service()
+    entries = service.awaiting_approval()
+    return {"count": len(entries), "awaiting_approval": entries}
+
+
+@app.get("/guardian/blocked")
+def blocked_drafts() -> dict:
+    service = get_service()
+    entries = service.blocked_drafts()
+    return {"count": len(entries), "blocked": entries}
+
+
 @app.get("/model-calls")
 def list_model_calls(run_id: str | None = None) -> dict:
     service = get_service()

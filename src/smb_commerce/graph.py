@@ -2,9 +2,9 @@
 
 The spine never changes shape — only its nodes grow: ingest the
 dataset, compute the ledger, run the diagnosis packs, assemble the
-growth plan, draft over it through the governed model port, verify
-everything. Later rounds hang the guardian screen and the approval
-queue on these same nodes.
+growth plan, draft over it through the governed model port, screen
+every draft through the guardian, verify everything. The approval
+queue (Round 8) hangs on these same nodes.
 
 State is a plain dict of counts and artefact ids, never figures: the
 figures live in the artefacts, and nodes pass references.
@@ -38,6 +38,11 @@ class LoopState(TypedDict, total=False):
     narrative_draft_id: str
     email_copy_draft_id: str
     ad_note_draft_id: str
+    narrative_verdict_id: str
+    email_copy_verdict_id: str
+    ad_note_verdict_id: str
+    guardian_blocked: int
+    awaiting_approval: int
     verify_problems: list[str]
 
 
@@ -89,6 +94,20 @@ def build_graph(service: CommerceService):
             "ad_note_draft_id": drafts["ad_budget_note"].artefact_id,
         }
 
+    def screen_node(state: LoopState) -> LoopState:
+        verdicts = service.screen_all()
+        blocked = service.blocked_drafts()
+        return {
+            "narrative_verdict_id":
+                verdicts[state["narrative_draft_id"]].artefact_id,
+            "email_copy_verdict_id":
+                verdicts[state["email_copy_draft_id"]].artefact_id,
+            "ad_note_verdict_id":
+                verdicts[state["ad_note_draft_id"]].artefact_id,
+            "guardian_blocked": len(blocked),
+            "awaiting_approval": len(service.awaiting_approval()),
+        }
+
     def verify_node(state: LoopState) -> LoopState:
         problems: list[str] = []
         artefact = service.store.get_artefact(state["ledger_artefact_id"])
@@ -113,6 +132,13 @@ def build_graph(service: CommerceService):
                 problems.append("missing")
             else:
                 problems += service.drafting.verify(draft)
+        for key in ("narrative_verdict_id", "email_copy_verdict_id",
+                    "ad_note_verdict_id"):
+            verdict = service.store.get_artefact(state[key])
+            if verdict is None:
+                problems.append("missing")
+            else:
+                problems += service.guardian.verify(verdict)
         return {"verify_problems": problems}
 
     graph = StateGraph(LoopState)
@@ -121,12 +147,14 @@ def build_graph(service: CommerceService):
     graph.add_node("diagnose", diagnose_node)
     graph.add_node("plan", plan_node)
     graph.add_node("draft", draft_node)
+    graph.add_node("screen", screen_node)
     graph.add_node("verify", verify_node)
     graph.add_edge(START, "ingest")
     graph.add_edge("ingest", "ledger")
     graph.add_edge("ledger", "diagnose")
     graph.add_edge("diagnose", "plan")
     graph.add_edge("plan", "draft")
-    graph.add_edge("draft", "verify")
+    graph.add_edge("draft", "screen")
+    graph.add_edge("screen", "verify")
     graph.add_edge("verify", END)
     return graph.compile()

@@ -15,6 +15,8 @@ from pathlib import Path
 
 from . import generator
 from .config import Settings, load_settings
+from .guardian import draft_content_hash
+from .models import Artefact
 from .service import CommerceService
 
 
@@ -235,6 +237,66 @@ def main() -> int:
               f"  drafting run total ${drafting_total}"
               f"  every draft a draft — nothing approved, sent or"
               f" published")
+
+        print("\n== Guardian screen — the second gate ==")
+        verdicts = service.screen_all()
+        for draft in drafts.values():
+            verdict = verdicts[draft.artefact_id]
+            vp = verdict.payload
+            print(f"  {vp['draft_kind']} {draft.artefact_id}"
+                  f" -> {vp['outcome']}  pack {vp['pack_version']}"
+                  f"  verdict {verdict.artefact_id}"
+                  f"  verified {not service.guardian.verify(verdict)}")
+        # A planted bad draft, written straight into the store —
+        # it never passed the drafting gate, which is exactly
+        # what the guardian is the second net for.
+        proposal_id = copy.payload["source_bindings"]["proposal"]
+        audit_id = copy.payload["source_bindings"]["audit"]
+        planted_payload = {
+            "draft_kind": "winback_email_copy",
+            "status": "draft",
+            "source_bindings": {"proposal": proposal_id,
+                                "audit": audit_id},
+            "source_artefact_ids": sorted([proposal_id, audit_id]),
+            "model_profile": "offline",
+            "model": "planted-by-hand",
+            "tier": "standard",
+            "model_call_id": "CALL-planted",
+            "run_id": "planted",
+            "content": {"steps": [
+                {"subject": "A treat, on us",
+                 "body": "Take 50% off your next order — results"
+                         " guaranteed, unlike the shoddy throws"
+                         " at BrightNest Living."},
+                {"subject": "Still thinking it over?",
+                 "body": "Your favourites are waiting."},
+            ]},
+            "claims": copy.payload["claims"],
+            "supersedes": None,
+        }
+        planted = Artefact(
+            artefact_id="DCE-plantedbad000000001",
+            kind="draft_email_copy", payload=planted_payload,
+            input_fingerprint="planted",
+        )
+        service.store.insert_artefact(planted)
+        planted_verdict = service.screen_draft(planted)
+        pv = planted_verdict.payload
+        print(f"  planted draft {planted.artefact_id}"
+              f" hash {draft_content_hash(planted)[:12]}..."
+              f" -> {pv['outcome']}")
+        for rule in pv["rules"]:
+            if rule["outcome"] == "block":
+                print(f"    BLOCK {rule['rule_id']}:"
+                      f" {'; '.join(rule['detail'][:2])}")
+        awaiting = service.awaiting_approval()
+        awaiting_ids = {e["draft_artefact_id"] for e in awaiting}
+        print(f"  awaiting approval: {len(awaiting)} drafts"
+              f" (screened and passing — approval itself is a"
+              f" named human act, Round 8)")
+        print(f"  planted draft awaiting approval:"
+              f" {planted.artefact_id in awaiting_ids}"
+              f" — the gate holds")
 
         print("\n== Model port (offline profile, governed) ==")
         reply = service.draft(

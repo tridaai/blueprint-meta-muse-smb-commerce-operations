@@ -2,12 +2,16 @@
 
 Commands: generate, facts, ledger, verify, diagnose,
 diagnose-verify, refusals, plan, plan-verify, plan-refusals,
-draft, drafts, drafts-verify, draft-refusals, model-calls. The
+draft, drafts, drafts-verify, draft-refusals, screen, verdicts,
+verdicts-verify, awaiting-approval, model-calls. The
 diagnose commands cover all five diagnoses (stockout, ad decay,
 expense anomalies, refund anomalies, and the email-flow audit);
 the plan commands assemble the growth plan from the computed
 record and re-verify it; the draft commands run the governed
-drafting pass over the plan and read its drafts and refusals.
+drafting pass over the plan and read its drafts and refusals;
+the screen commands run the guardian screen over the drafts and
+read its verdicts, the blocked list and the awaiting-approval
+gate.
 Output is plain text sized for a terminal; figures come from
 the ledger artefact, never recomputed on the fly by the CLI
 itself.
@@ -167,13 +171,26 @@ def _print_draft(artefact) -> None:
               f" {claim['source_artefact_id']} {claim['source_field']}")
 
 
+def _print_verdict(verdict) -> None:
+    p = verdict.payload
+    print(f"VERDICT {verdict.artefact_id} draft {p['draft_artefact_id']}"
+          f" outcome {p['outcome']} pack {p['pack_version']}"
+          f" call {p['screening_call_id']}")
+    for rule in p["rules"]:
+        print(f"  {rule['source']:<5} {rule['rule_id']:<28}"
+              f" {rule['outcome']}")
+    if p["blocking_rules"]:
+        print(f"  blocking: {', '.join(p['blocking_rules'])}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="smb-commerce")
     parser.add_argument("command", choices=[
         "generate", "facts", "ledger", "verify", "diagnose",
         "diagnose-verify", "refusals", "plan", "plan-verify",
         "plan-refusals", "draft", "drafts", "drafts-verify",
-        "draft-refusals", "model-calls"])
+        "draft-refusals", "screen", "verdicts", "verdicts-verify",
+        "awaiting-approval", "model-calls"])
     parser.add_argument("--kind", default=None)
     parser.add_argument("--run-id", default=None)
     args = parser.parse_args(argv)
@@ -305,6 +322,52 @@ def main(argv: list[str] | None = None) -> int:
                   f" {refusal.payload['draft_kind']}:"
                   f" {', '.join(refusal.payload['problems'])}")
         print(f"{len(refusals)} draft refusals")
+        return 0
+    if args.command == "screen":
+        verdicts = service.screen_all()
+        for verdict in verdicts.values():
+            _print_verdict(verdict)
+        return 0
+    if args.command == "verdicts":
+        verdicts = service.store.list_artefacts("guardian_verdict")
+        for verdict in verdicts:
+            _print_verdict(verdict)
+        print(f"{len(verdicts)} verdicts")
+        return 0
+    if args.command == "verdicts-verify":
+        status = 0
+        seen: set[str] = set()
+        for kind in DRAFT_KINDS:
+            for draft in service.store.list_artefacts(kind):
+                verdict = service.guardian.latest_verdict(
+                    draft.artefact_id)
+                if verdict is None:
+                    print(json.dumps({
+                        "draft_artefact_id": draft.artefact_id,
+                        "verified": False, "problems": ["not_screened"]}))
+                    status = 1
+                    continue
+                if verdict.artefact_id in seen:
+                    continue
+                seen.add(verdict.artefact_id)
+                problems = service.guardian.verify(verdict)
+                print(json.dumps({
+                    "artefact_id": verdict.artefact_id,
+                    "verified": not problems, "problems": problems}))
+                status = status or (1 if problems else 0)
+        return status
+    if args.command == "awaiting-approval":
+        awaiting = service.awaiting_approval()
+        for entry in awaiting:
+            print(f"AWAITING {entry['draft_kind']}"
+                  f" {entry['draft_artefact_id']}"
+                  f" verdict {entry['verdict_artefact_id']}"
+                  f" pack {entry['pack_version']}")
+        print(f"{len(awaiting)} awaiting approval")
+        for entry in service.blocked_drafts():
+            print(f"BLOCKED {entry['draft_kind']}"
+                  f" {entry['draft_artefact_id']}"
+                  f" rules {', '.join(entry['blocking_rules'])}")
         return 0
     if args.command == "model-calls":
         calls = service.store.list_model_calls(args.run_id)

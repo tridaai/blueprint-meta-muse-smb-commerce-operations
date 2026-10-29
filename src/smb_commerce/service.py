@@ -13,6 +13,7 @@ from . import generator
 from .config import Settings, load_settings
 from .diagnosis import DiagnosisService
 from .drafting import DraftingService
+from .guardian import GuardianService
 from .ingest import IngestPort, IngestReport
 from .ledger import LedgerService
 from .modelport import GovernedModelPort, build_model_port
@@ -40,6 +41,7 @@ class CommerceService:
         self.plan = PlanService(self.store)
         self.model: GovernedModelPort = build_model_port(self.settings, self.store)
         self.drafting = DraftingService(self.store, self.model)
+        self.guardian = GuardianService(self.store, self.model)
         self.objects: ObjectStore = build_object_store(self.settings)
 
     # -- dataset ---------------------------------------------------------
@@ -98,3 +100,16 @@ class CommerceService:
 
     def draft_all(self):
         return self.drafting.draft_all()
+
+    # -- guardian screen -----------------------------------------------------
+    def screen_draft(self, draft):
+        return self.guardian.screen(draft)
+
+    def screen_all(self):
+        return self.guardian.screen_all()
+
+    def awaiting_approval(self):
+        return self.guardian.awaiting_approval()
+
+    def blocked_drafts(self):
+        return self.guardian.blocked_drafts()
