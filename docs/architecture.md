@@ -93,8 +93,10 @@ Every surface — API, CLI, demo, graph — talks to one
   run all five diagnoses, the email-flow audit included; Round 5
   inserted the plan node between diagnose and verify, and the
   verify node re-performs the plan alongside the ledger and the
-  finding sets; later rounds insert nodes between `verify` and
-  `END` without changing the spine.
+  finding sets; Round 6 inserted the draft node between plan and
+  verify, and the verify node re-performs the drafts too; later
+  rounds insert nodes between `verify` and `END` without
+  changing the spine.
 - **Plan** (`plan.py`): the growth plan assembler and its verifier.
   The plan pack states the family order, the per-family exposure
   fields and the summary figure list as data; the assembler copies
@@ -104,6 +106,20 @@ Every surface — API, CLI, demo, graph — talks to one
   citation and re-derives the ranking by a second route; the
   assembly gate applies the same checks plus head currency, and a
   failure records a plan refusal artefact instead of a plan.
+- **Drafting** (`drafting.py`): the governed drafting service.
+  It builds a figure sheet per draft — the only figures the
+  draft may state, each citing artefact id and field — calls the
+  model through the governed port, and gates the reply in two
+  directions: every claim in the reply's structured claims list
+  must re-resolve against the artefact it cites, and every
+  figure token in the prose must be carried by a claim. A
+  failure records a draft refusal artefact (the offending claim
+  named, the refused text never stored) and stores no draft.
+  Draft artefacts are stamped with profile, tier and the
+  cost-ledger record id of their call; `verify` re-performs a
+  stored draft at any time, the stamped call included. The
+  offline profile composes its drafting replies from the figure
+  sheet alone, so the gate passes deterministically offline.
 
 ## Data model
 
