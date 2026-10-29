@@ -356,10 +356,26 @@ class DiagnosisService:
         return artefact
 
     def _ledger_currency_problems(self, ledger: Artefact) -> list[str]:
+        """The ledger must still describe the stored fact set exactly:
+        the fingerprint over the facts must match, and every fact's
+        content hash must re-perform from its own fields — a payload
+        edited behind the store's back leaves the fingerprint intact
+        but fails the second check, the same discipline the ledger's
+        own verifier applies."""
+        from .ingest import content_hash
+
         facts = self._store.list_facts()
-        if facts_fingerprint(facts) != ledger.input_fingerprint:
-            return ["ledger_not_current"]
-        return []
+        problems: list[str] = []
+        stale = facts_fingerprint(facts) != ledger.input_fingerprint
+        for fact in facts:
+            digest = content_hash(fact.kind, fact.natural_key, fact.payload,
+                                  fact.source_system, fact.as_of)
+            if digest != fact.content_hash:
+                stale = True
+                problems.append(f"fact_content_hash_mismatch:{fact.fact_id}")
+        if stale:
+            problems.insert(0, "ledger_not_current")
+        return problems
 
     def diagnose_stockout(self) -> Artefact:
         ledger = self._head_ledger()

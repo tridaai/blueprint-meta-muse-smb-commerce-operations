@@ -2,8 +2,9 @@
 """Eval gate v1 for Blueprint #22 — SMB Commerce Operations Agent.
 
 Runs against a throwaway store (no disk state shared with anything,
-no network, no keys) and grades the Round 1 foundation guarantees
-against the planted truth in the generator's stated constants.
+no network, no keys) and grades the foundation guarantees and the
+Round 2 diagnosis packs against the planted truth in the generator's
+stated constants.
 
 Zero-tolerance counters:
   - provenance_refusal_missed .... a fact without source or as-of was
@@ -24,6 +25,16 @@ Zero-tolerance counters:
                                    a recorded model-call cost that the
                                    price table cannot re-perform
   - tier_stamp_missing ........... a call record without a tier stamp
+  - stockout_false_positives ..... a SKU named at risk that the
+                                   planted truth does not name
+  - stockout_false_negatives ..... the planted fast mover not named
+  - ad_decay_false_positives ..... an ad set named decaying that the
+                                   planted truth does not name
+  - ad_decay_false_negatives ..... the planted decaying set not named
+  - finding_reperformance_mismatches
+                                   a diagnosis verifier problem, or a
+                                   planted figure in a finding that
+                                   does not match the stated constants
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -53,6 +64,9 @@ def main() -> int:
         "planted_cover_mismatch", "planted_decay_mismatch",
         "duplicate_charge_missing", "winback_state_wrong",
         "cost_ledger_reconciliation_errors", "tier_stamp_missing",
+        "stockout_false_positives", "stockout_false_negatives",
+        "ad_decay_false_positives", "ad_decay_false_negatives",
+        "finding_reperformance_mismatches",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -138,6 +152,38 @@ def main() -> int:
         expected_flows = {key for key, _name, _steps in generator.EMAIL_FLOWS}
         if generator.MISSING_FLOW in defined or defined != expected_flows:
             counters["winback_state_wrong"] += 1
+
+        # Diagnosis packs I: the named sets must equal the planted
+        # truth exactly, and every finding must re-perform.
+        stockout = service.diagnose_stockout()
+        named_stockout = {f["sku"] for f in stockout.payload["findings"]}
+        expected_stockout = {generator.FAST_MOVER_SKU}
+        counters["stockout_false_positives"] += len(
+            named_stockout - expected_stockout)
+        counters["stockout_false_negatives"] += len(
+            expected_stockout - named_stockout)
+        counters["finding_reperformance_mismatches"] += len(
+            service.diagnosis.verify(stockout))
+        if named_stockout == expected_stockout:
+            finding = stockout.payload["findings"][0]
+            if not (finding["cover_days"] == "21.00"
+                    and finding["cover_out_date"] == "2026-01-25"
+                    and finding["on_hand"] == 210
+                    and finding["trailing_velocity_per_day"] == "10.00"):
+                counters["finding_reperformance_mismatches"] += 1
+        decay = service.diagnose_ad_decay()
+        named_decay = {f["ad_set"] for f in decay.payload["findings"]}
+        expected_decay = {generator.DECAY_SET}
+        counters["ad_decay_false_positives"] += len(named_decay - expected_decay)
+        counters["ad_decay_false_negatives"] += len(expected_decay - named_decay)
+        counters["finding_reperformance_mismatches"] += len(
+            service.diagnosis.verify(decay))
+        if named_decay == expected_decay:
+            finding = decay.payload["findings"][0]
+            if not (finding["first_week_roas"] == "4.0000"
+                    and finding["latest_week_roas"] == "0.1704"
+                    and finding["decay_factor"] == "0.0426"):
+                counters["finding_reperformance_mismatches"] += 1
 
         # Cost ledger: an offline call and a stubbed hosted call, each
         # re-performed against the price table, each tier-stamped.
