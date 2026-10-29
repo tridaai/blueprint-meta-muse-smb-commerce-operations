@@ -35,7 +35,14 @@ No key is needed for any of the above. The default model profile is a determinis
 - **The model port (Law 6).** One governed port for all model calls. Profiles: `meta-muse` (Muse Spark via the Meta Model API, OpenAI-compatible shape) and `offline`. Every call is written to a per-run cost ledger with tokens, profile, tier and a cost computed from the published price table — Standard $1.25 / $4.25 per 1M input/output tokens, Contributor $0.10 / $0.20 — and totals reconcile exactly. Standard is the default tier because Meta does not train on its data; Contributor must be chosen explicitly and is stamped on every record.
 - **Surfaces.** A LangGraph loop (ingest → compute → verify), FastAPI reads (`/facts`, `/ledger`, `/ledger/verify`, `/model-calls`), a CLI, and a demo that prints the operating picture with the planted patterns visible in the computed figures.
 
-Diagnosis packs, drafting, the guardian screen and the approval queue are the next rounds on the map in `docs/architecture.md`.
+## What Round 2 builds
+
+- **Diagnosis pack I (Law 5).** The rules are data in a versioned pack (`2026.10.1`): a stockout horizon of 24.00 cover days against a trailing 28-day velocity, and ad-decay bars — a set is judged only above $2,600.00 total spend and 8 weeks of history, and is decaying when its latest-week return on spend falls to at most half its first-week return (a set retaining 90% or more is steady by construction). The pack's thresholds are stated in the module, so the same inputs always re-perform to the same findings.
+- **Findings as artefacts (Law 4).** The stockout diagnosis names the Washed Linen Throw: 210 on hand, 21.00 cover days at 10.00 units a day, out on 2026-01-25. SKUs with adequate cover are named nowhere; a SKU with no stock or no sales reads as no-data, never as zero risk or zero cover. The ad-decay diagnosis names Social — Seasonal Decor: return on spend 4.0000 in its first week, 0.1704 in its last, a decay factor of 0.0426. The steady sets (3.5000 and 2.0000 all year) are named nowhere; a set below the spend bar is named as unjudged, with the reason.
+- **Re-performance before existence.** Each diagnosis is computed from the head ledger artefact's figures and re-performed from the stored facts by a second route before the finding set is stored. One wrong figure — or a ledger that no longer matches the fact set, down to a fact edited behind the store's back — refuses the whole set: a refusal artefact is recorded and no finding is stored. A stored finding set can be re-verified at any time through the same second route.
+- **Surfaces.** The LangGraph loop gains a diagnose node between compute and verify. FastAPI reads (`/diagnosis/stockout`, `/diagnosis/ad-decay`, their `/verify` companions, `/diagnosis/refusals`), CLI commands (`diagnose`, `diagnose-verify`, `refusals`), and the demo walks both diagnoses right after the ledger.
+
+The expense and refund anomaly pack, the email-flow audit, drafting, the guardian screen and the approval queue are the next rounds on the map in `docs/architecture.md`.
 
 ## The laws
 
@@ -48,7 +55,7 @@ Diagnosis packs, drafting, the guardian screen and the approval queue are the ne
 
 ## Honest status
 
-- Round 1 of 20 is built: foundation only. Diagnosis, drafting, guardian and approval land in the rounds on the architecture map; the agent does not yet diagnose, draft or approve anything.
+- Round 2 of 20 is built: foundation plus diagnosis packs I. The agent diagnoses stockout risk and ad decay from the ledger, with every finding re-performed before it may exist; it does not yet flag expense anomalies or audit email flows (Rounds 3–4), and it does not draft, screen or approve anything (Rounds 5–8).
 - The vendor systems (storefront, ads manager, email platform, books) are local doubles behind the ingest port's contracts; no real store, ad account or mailbox is connected.
 - The hosted `meta-muse` profile is stub-tested against a local double of the Meta Model API shape. No real API call has been made — there is no key in hand yet — and the model identifier is the configurable default `muse-spark` from `.env.example`; confirm the current identifier at dev.meta.ai before a live run.
 - Approval is the end of the line by design: the blueprint never executes against real systems, even in later rounds.

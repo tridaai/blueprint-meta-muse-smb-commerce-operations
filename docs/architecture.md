@@ -13,7 +13,7 @@ vendor systems (local doubles)          the agent loop (LangGraph)
                               model port (governed) ◄─────┘
                                 offline │ meta-muse          │
                                 cost ledger (per run)        ▼
-                                          later rounds: diagnose ─► draft
+                                          diagnose (R2) ─► later rounds: draft
                                           ─► guardian screen ─► approval queue
 ```
 
@@ -50,6 +50,19 @@ Every surface — API, CLI, demo, graph — talks to one
   disagreement, not a formatting one. The artefact id is a hash of the
   payload plus the fingerprint of the fact set, so the same facts
   always produce the same artefact and different facts never do.
+- **Diagnosis** (`diagnosis.py`): pack I — stockout risk and ad
+  decay — with the rules held as data in a versioned pack. Route 1
+  reads the head ledger artefact's own figures; route 2 re-derives
+  the same inputs from the facts by grouped accumulation in key
+  order. Both routes share only the classification shaping, so a
+  disagreement is a computation disagreement. A mismatch — or a
+  ledger that no longer matches the fact set, checked down to each
+  fact's content hash re-performing from its own fields — records a
+  refusal artefact and stores no finding. Finding sets are
+  insert-only artefacts tied to the exact ledger artefact they
+  diagnose; adequate SKUs and steady ad sets are named nowhere in
+  them, while no-data SKUs and unjudged ad sets are named as such,
+  with reasons.
 - **Model port** (`modelport.py`): profiles behind one interface, a
   governed wrapper that records every call before returning the
   reply. The price table is data, so reconciliation re-performs costs
@@ -63,8 +76,9 @@ Every surface — API, CLI, demo, graph — talks to one
   fails closed on incomplete configuration. Round 1 wires the port;
   report packs use it from Round 17.
 - **Graph** (`graph.py`): a LangGraph `StateGraph` whose nodes pass
-  counts and artefact ids, never figures. Later rounds insert nodes
-  between `verify` and `END` without changing the spine.
+  counts and artefact ids, never figures. Round 2 inserted the
+  diagnose node between compute and verify; later rounds insert
+  nodes between `verify` and `END` without changing the spine.
 
 ## Data model
 
