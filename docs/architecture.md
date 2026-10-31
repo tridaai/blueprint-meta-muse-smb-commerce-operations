@@ -15,6 +15,7 @@ vendor systems (local doubles)          the agent loop (LangGraph)
                                 cost ledger (per run)        ▼
                                           diagnose (R2) ─► later rounds: draft
                                           ─► guardian screen ─► approval queue
+                                          ─► morning board (a read, not a step)
 ```
 
 Every surface — API, CLI, demo, graph — talks to one
@@ -98,7 +99,11 @@ Every surface — API, CLI, demo, graph — talks to one
   rounds insert nodes between `verify` and `END` without
   changing the spine. Round 7 inserted the screen node between
   draft and verify, and the verify node re-performs the guardian
-  verdicts alongside everything else.
+  verdicts alongside everything else. Round 9 adds no node: the
+  morning board is composed at read time from the record the
+  loop leaves behind, like the approval queue's fold — a board
+  node would imply the board is a pipeline product, and it is
+  a derivation, not a step.
 - **Plan** (`plan.py`): the growth plan assembler and its verifier.
   The plan pack states the family order, the per-family exposure
   fields and the summary figure list as data; the assembler copies
@@ -166,6 +171,26 @@ Every surface — API, CLI, demo, graph — talks to one
   still verifies as a true historical record; an act that
   fails `verify` (hash mismatch, non-passing verdict, a claim
   of execution) is excluded from the approved list.
+- **Board** (`board.py`): the morning board, Round 9 — the
+  operator's opening view as a pure derivation. It folds the
+  head ledger's figures (each citing its ledger field), the
+  plan's ranked findings with their figures copied from the
+  cited finding artefacts, the stockout findings called out
+  as stock risks, and the approval picture (awaiting behind
+  the guardian's gate, blocked with their rules, approved
+  reading `approved — not sent` with staleness marked as the
+  queue marks it, rejected with their reasons). The board is
+  composed fresh on every read and returned as an in-memory
+  content-addressed artefact — never inserted, so no surface
+  can edit anything onto it — and it pins the heads it folded
+  (ledger, plan, each diagnosis, the latest verdict per
+  draft, the latest acts) so later movement is detectable.
+  `verify` re-performs a board end to end by a second route —
+  the sections recomposed from the queue folds and the
+  finding sets directly, every figure re-resolved against
+  its cited artefact, the pins compared against the current
+  heads — so a forged, tampered or simply out-of-date board
+  fails verification with the section or figure named.
 
 ## Data model
 
