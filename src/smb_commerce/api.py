@@ -3,7 +3,9 @@ artefacts and the cost ledger.
 
 Reads dominate by design; the only writes are the Round 8 approval
 acts (`POST /approvals/approve`, `POST /approvals/reject`), which
-record a named human's act and execute nothing. Every request gets
+record a named human's act and execute nothing. The morning board
+(`/board`, Round 9) is a read too: it is re-derived from the
+record on every call and never stored. Every request gets
 a request id, echoed in the ``X-Request-Id`` header and stamped
 into the JSON logs.
 """
@@ -442,6 +444,26 @@ def reject_draft(body: RejectRequest) -> dict:
             "problems": refused.refusal.payload["problems"],
         })
     return act.model_dump()
+
+
+@app.get("/board")
+def morning_board() -> dict:
+    service = get_service()
+    if service.store.count_facts() == 0:
+        raise HTTPException(status_code=404, detail="no board yet")
+    board = service.derive_board()
+    return board.model_dump()
+
+
+@app.get("/board/verify")
+def verify_board() -> dict:
+    service = get_service()
+    if service.store.count_facts() == 0:
+        raise HTTPException(status_code=404, detail="no board yet")
+    board = service.derive_board()
+    problems = service.board.verify(board)
+    return {"artefact_id": board.artefact_id, "verified": not problems,
+            "problems": problems}
 
 
 @app.get("/model-calls")

@@ -360,6 +360,50 @@ def main() -> int:
               " budget moves — execution against real systems is"
               " out of scope by design")
 
+        print("\n== Morning board — the operator's opening view ==")
+        board = service.derive_board()
+        bp = board.payload
+        bcounts = bp["headline"]["counts"]
+        print(f"  board {board.artefact_id}  as of {bp['as_of']}"
+              f"  pins ledger {bp['pins']['ledger_head']}"
+              f"  plan {bp['pins']['plan_head']}"
+              f"  verified {not service.board.verify(board)}")
+        print(f"  headline, copied from the ledger:")
+        for figure in bp["headline"]["figures"]:
+            print(f"    {figure['name']:<14} {figure['value']:>12}")
+        print(f"  {bcounts['findings']} findings in plan order:")
+        for entry in bp["findings"]:
+            if entry["rank"] is None:
+                print(f"    NO-FINDINGS {entry['family']}"
+                      f"  judged by diagnosis pack"
+                      f" {entry['judged_by_pack_version']}")
+            else:
+                print(f"    {entry['rank']}. {entry['family']}"
+                      f"  {entry['finding_key']}"
+                      f"  exposure {entry['exposure']}")
+        for risk in bp["stock_risks"]:
+            print(f"  STOCK RISK {risk['sku']} {risk['name']}"
+                  f"  on hand {risk['on_hand']}"
+                  f"  cover {risk['cover_days']} days"
+                  f"  out {risk['cover_out_date']}")
+        print(f"  approval picture: {bcounts['awaiting_approval']}"
+              f" awaiting, {bcounts['approved']} approved"
+              f" — not sent ({bcounts['approved_stale']} stale),"
+              f" {bcounts['rejected']} rejected,"
+              f" {bcounts['blocked']} blocked at the guardian,"
+              f" {bcounts['unscreened']} unscreened")
+        for entry in bp["approved"]:
+            print(f"    {entry['draft_kind']}"
+                  f" {entry['draft_artefact_id']}"
+                  f" — {entry['display_status']}"
+                  f"  stale {entry['stale']}")
+        for entry in bp["blocked"]:
+            print(f"    BLOCKED {entry['draft_kind']}"
+                  f" {entry['draft_artefact_id']}"
+                  f" rules {', '.join(entry['blocking_rules'])}")
+        print("  the board is re-derived from the record on every"
+              " read — it stores nothing and edits nothing")
+
         print("\n== Model port (offline profile, governed) ==")
         reply = service.draft(
             "demo-run",

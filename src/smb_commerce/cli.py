@@ -4,8 +4,8 @@ Commands: generate, facts, ledger, verify, diagnose,
 diagnose-verify, refusals, plan, plan-verify, plan-refusals,
 draft, drafts, drafts-verify, draft-refusals, screen, verdicts,
 verdicts-verify, awaiting-approval, queue, approve, reject,
-approvals-verify, approval-history, approval-refusals,
-model-calls. The
+approvals-verify, approval-history, approval-refusals, board,
+board-verify, model-calls. The
 diagnose commands cover all five diagnoses (stockout, ad decay,
 expense anomalies, refund anomalies, and the email-flow audit);
 the plan commands assemble the growth plan from the computed
@@ -16,7 +16,9 @@ read its verdicts, the blocked list and the awaiting-approval
 gate; the queue commands read the approval queue folded from
 the acts, and approve/reject record the named human act —
 approved always reads "approved — not sent", because approval
-executes nothing.
+executes nothing. The board commands print the morning board —
+the operator's opening view, re-derived from the record on
+every call — and re-perform it end to end.
 Output is plain text sized for a terminal; figures come from
 the ledger artefact, never recomputed on the fly by the CLI
 itself.
@@ -214,6 +216,67 @@ def _print_approval_queue(service: CommerceService) -> None:
           f" {len(queue['rejected'])} rejected")
 
 
+def _draft_label(entry) -> str:
+    summary = entry.get("summary", {})
+    if "subjects" in summary:
+        return f"  [{'; '.join(summary['subjects'])}]"
+    return f"  [{summary.get('opening_line', '')}]"
+
+
+def _print_board(board) -> None:
+    p = board.payload
+    print(f"BOARD {board.artefact_id} as of {p['as_of']}"
+          f" ledger {p['pins']['ledger_head']}"
+          f" plan {p['pins']['plan_head']}")
+    counts = p["headline"]["counts"]
+    print(f"  {counts['findings']} findings,"
+          f" {counts['awaiting_approval']} awaiting approval,"
+          f" {counts['approved']} approved — not sent"
+          f" ({counts['approved_stale']} stale),"
+          f" {counts['rejected']} rejected,"
+          f" {counts['blocked']} blocked,"
+          f" {counts['unscreened']} unscreened")
+    for figure in p["headline"]["figures"]:
+        print(f"  {figure['name']:<14} {figure['value']:>12}"
+              f"  from {figure['source_artefact_id']}")
+    for entry in p["findings"]:
+        if entry["rank"] is None:
+            print(f"  NO-FINDINGS {entry['family']}"
+                  f" judged by diagnosis pack"
+                  f" {entry['judged_by_pack_version']}")
+        else:
+            print(f"  FINDING {entry['rank']} {entry['family']}"
+                  f" {entry['finding_key']}"
+                  f" exposure {entry['exposure']}")
+    for risk in p["stock_risks"]:
+        print(f"  STOCK RISK {risk['sku']} {risk['name']}"
+              f"  on hand {risk['on_hand']}"
+              f"  cover {risk['cover_days']} days"
+              f"  out {risk['cover_out_date']}"
+              f"  velocity {risk['trailing_velocity_per_day']}/day")
+    for entry in p["awaiting_approval"]:
+        print(f"  AWAITING {entry['draft_kind']}"
+              f" {entry['draft_artefact_id']}"
+              f" verdict {entry['verdict_artefact_id']}"
+              f"{_draft_label(entry)}")
+    for entry in p["approved"]:
+        stale = (f" STALE moved: {', '.join(entry['moved_inputs'])}"
+                 if entry["stale"] else "")
+        print(f"  APPROVED {entry['draft_kind']}"
+              f" {entry['draft_artefact_id']}"
+              f" by {entry['approver']}"
+              f" — {entry['display_status']}{stale}")
+    for entry in p["rejected"]:
+        print(f"  REJECTED {entry['draft_kind']}"
+              f" {entry['draft_artefact_id']}"
+              f" by {entry['rejecter']}"
+              f" reason {entry['reason_code']}")
+    for entry in p["blocked"]:
+        print(f"  BLOCKED {entry['draft_kind']}"
+              f" {entry['draft_artefact_id']}"
+              f" rules {', '.join(entry['blocking_rules'])}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="smb-commerce")
     parser.add_argument("command", choices=[
@@ -223,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         "draft-refusals", "screen", "verdicts", "verdicts-verify",
         "awaiting-approval", "queue", "approve", "reject",
         "approvals-verify", "approval-history", "approval-refusals",
-        "model-calls"])
+        "board", "board-verify", "model-calls"])
     parser.add_argument("--kind", default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--draft", default=None)
@@ -493,6 +556,15 @@ def main(argv: list[str] | None = None) -> int:
                   f" {', '.join(refusal.payload['problems'])}")
         print(f"{len(refusals)} approval refusals")
         return 0
+    if args.command == "board":
+        _print_board(service.derive_board())
+        return 0
+    if args.command == "board-verify":
+        board = service.derive_board()
+        problems = service.board.verify(board)
+        print(json.dumps({"artefact_id": board.artefact_id,
+                          "verified": not problems, "problems": problems}))
+        return 0 if not problems else 1
     if args.command == "model-calls":
         calls = service.store.list_model_calls(args.run_id)
         for call in calls:
