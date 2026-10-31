@@ -160,6 +160,31 @@ Zero-tolerance counters:
                                    executed or published, or without
                                    the exact display status
                                    "approved — not sent"
+  - board_figure_mismatches_accepted
+                                   a morning-board headline figure
+                                   that does not re-resolve against
+                                   the head ledger it cites, or a
+                                   forged board with a changed
+                                   figure that verify() accepts
+  - board_section_mismatches_accepted
+                                   a board section that differs
+                                   from the queue or guardian fold
+                                   it claims to restate, a dropped
+                                   board entry, or a moved board
+                                   pin that verify() accepts
+  - board_reperformance_mismatches a freshly derived board that
+                                   verify() reports problems on, a
+                                   board pin that is not the
+                                   current head, a stock-risk call
+                                   -out that is not the planted
+                                   fast mover, a board count that
+                                   disagrees with its section, or
+                                   a board stored as an artefact
+  - board_stale_shown_clean ...... an approved entry on the board
+                                   whose bound inputs have moved
+                                   that the board shows as not
+                                   stale, or a forged board showing
+                                   it clean that verify() accepts
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -167,6 +192,7 @@ Exit code 0 on PASS, 1 on FAIL.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import sys
@@ -218,6 +244,9 @@ def main() -> int:
         "approvals_without_passing_verdict",
         "approvals_on_hash_mismatch", "double_approvals_accepted",
         "stale_approvals_shown_clean", "approved_shown_as_executed",
+        "board_figure_mismatches_accepted",
+        "board_section_mismatches_accepted",
+        "board_reperformance_mismatches", "board_stale_shown_clean",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -1046,6 +1075,92 @@ def main() -> int:
             counters["stale_approvals_shown_clean"] += 1
         if stale_entry["display_status"] != "approved — not sent":
             counters["approved_shown_as_executed"] += 1
+
+        # Morning board (Round 9): the opening view over the
+        # final record must re-derive clean, its headline must
+        # re-resolve against the head ledger, its sections must
+        # equal the queue and guardian folds, its stock-risk
+        # call-out must be the planted fast mover, and the stale
+        # approved narrative must show STALE on the board.
+        # Forged boards — a figure changed, an entry dropped, a
+        # stale approval shown clean, a pin moved — must fail
+        # verify() with the problem named.
+        board = service.derive_board()
+        counters["board_reperformance_mismatches"] += len(
+            service.board.verify(board))
+        board_payload = board.payload
+        head_ledger = service.store.latest_artefact("ledger")
+        for figure in board_payload["headline"]["figures"]:
+            if (figure["source_artefact_id"] != head_ledger.artefact_id
+                    or figure["value"]
+                    != head_ledger.payload[figure["source_field"]]):
+                counters["board_figure_mismatches_accepted"] += 1
+        if (board_payload["pins"]["ledger_head"]
+                != head_ledger.artefact_id
+                or board_payload["pins"]["plan_head"]
+                != service.store.latest_artefact(
+                    "growth_plan").artefact_id):
+            counters["board_reperformance_mismatches"] += 1
+        if [r["sku"] for r in board_payload["stock_risks"]] != [
+                generator.FAST_MOVER_SKU]:
+            counters["board_reperformance_mismatches"] += 1
+        if ({e["draft_artefact_id"]
+                for e in board_payload["awaiting_approval"]}
+                != {e["draft_artefact_id"]
+                    for e in service.approvals.awaiting()}):
+            counters["board_section_mismatches_accepted"] += 1
+        if ({e["draft_artefact_id"] for e in board_payload["approved"]}
+                != {e["draft_artefact_id"]
+                    for e in service.approvals.approved()}):
+            counters["board_section_mismatches_accepted"] += 1
+        board_counts = board_payload["headline"]["counts"]
+        for name in ("awaiting_approval", "approved", "rejected",
+                     "blocked", "stock_risks"):
+            if board_counts[name] != len(board_payload[name]):
+                counters["board_reperformance_mismatches"] += 1
+        board_stale = {
+            e["draft_artefact_id"]: e
+            for e in board_payload["approved"]
+        }[drafts["plan_narrative"].artefact_id]
+        if not board_stale["stale"] or not board_stale["moved_inputs"]:
+            counters["board_stale_shown_clean"] += 1
+        if service.store.list_artefacts("morning_board"):
+            counters["board_reperformance_mismatches"] += 1
+
+        def _expect_board_problem(payload, problem, counter):
+            forged_board = Artefact(
+                artefact_id="BRD-forged0000000000000e",
+                kind="morning_board", payload=payload,
+                input_fingerprint="forged")
+            if problem not in service.board.verify(forged_board):
+                counters[counter] += 1
+
+        forged_payload = copy.deepcopy(board_payload)
+        forged_payload["headline"]["figures"][0]["value"] = "1.00"
+        _expect_board_problem(
+            forged_payload,
+            "board_figure_mismatch:headline:gross_revenue",
+            "board_figure_mismatches_accepted")
+        dropped_payload = copy.deepcopy(board_payload)
+        dropped_payload["approved"] = [
+            e for e in dropped_payload["approved"]
+            if e["draft_artefact_id"]
+            != drafts["plan_narrative"].artefact_id]
+        _expect_board_problem(
+            dropped_payload, "board_section_mismatch:approved",
+            "board_section_mismatches_accepted")
+        clean_payload = copy.deepcopy(board_payload)
+        for entry in clean_payload["approved"]:
+            entry["stale"] = False
+            entry["moved_inputs"] = []
+        _expect_board_problem(
+            clean_payload, "board_section_mismatch:approved",
+            "board_stale_shown_clean")
+        pin_payload = copy.deepcopy(board_payload)
+        pin_payload["pins"]["ledger_head"] = "LED-forged"
+        _expect_board_problem(
+            pin_payload, "board_pin_mismatch:ledger_head",
+            "board_section_mismatches_accepted")
 
         # Cost ledger: an offline call and a stubbed hosted call, each
         # re-performed against the price table, each tier-stamped.
