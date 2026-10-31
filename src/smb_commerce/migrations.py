@@ -33,7 +33,15 @@ def run_migrations(conn, migrations_dir: Path, dialect: str, paramstyle: str) ->
         "version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
     )
     rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
-    applied = {row["version"] if isinstance(row, dict) else row[0] for row in rows}
+    applied = set()
+    for row in rows:
+        version_value = row["version"] if isinstance(row, dict) else row[0]
+        # psycopg hands text back as bytes on a SQL_ASCII database;
+        # the filename's version is str, and b'0001' != '0001' would
+        # re-apply every migration on the second boot (Round 10).
+        if isinstance(version_value, bytes):
+            version_value = version_value.decode("utf-8")
+        applied.add(version_value)
     now = datetime.now(timezone.utc).isoformat()
     done: list[str] = []
     dialect_dir = migrations_dir / dialect

@@ -26,6 +26,11 @@ class Settings:
     model_profile: str
     model_tier: str
     log_level: str
+    # Postgres profile only (Round 10): when set, the store works
+    # inside this schema (created if missing) instead of the search
+    # path's default — the prod smoke and the parity leg use it to
+    # run in a throwaway schema of a shared test database.
+    postgres_schema: str = ""
 
     @property
     def use_postgres(self) -> bool:
@@ -61,4 +66,5 @@ def load_settings() -> Settings:
         model_profile=os.environ.get("SMB_MODEL_PROFILE", "offline"),
         model_tier=tier,
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
+        postgres_schema=os.environ.get("SMB_POSTGRES_SCHEMA", ""),
     )

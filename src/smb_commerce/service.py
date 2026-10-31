@@ -31,7 +31,9 @@ class CommerceService:
         self.settings = settings or load_settings()
         if self.settings.use_postgres:
             self.store = SqlStore.postgres(
-                self.settings.database_url, self.settings.migrations_dir
+                self.settings.database_url,
+                self.settings.migrations_dir,
+                schema=self.settings.postgres_schema or None,
             )
         else:
             self.store = SqlStore.sqlite(

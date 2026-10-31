@@ -14,6 +14,7 @@ inserting a new artefact that links to the one it replaces (Law 4).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,6 +26,24 @@ from .models import Artefact, Fact, ModelCallRecord
 
 def canonical_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _text(value: Any) -> Any:
+    """Normalise one value off the wire to the store's text shape.
+
+    psycopg returns ``bytes`` for text columns when the database
+    encoding is SQL_ASCII (it cannot know how to decode them), where
+    SQLite and a UTF-8 Postgres both return ``str``. Text in this
+    store is UTF-8 by construction, so bytes decode here — at the
+    one row-materialisation point — and every reader downstream
+    sees ``str`` on either dialect (Round 10: before this, a second
+    boot against a SQL_ASCII Postgres re-ran its migrations,
+    because b'0001' never equals the filename's '0001')."""
+    return value.decode("utf-8") if isinstance(value, bytes) else value
+
+
+def _decode_row(row: dict) -> dict:
+    return {key: _text(value) for key, value in row.items()}
 
 
 class SqlStore:
@@ -66,11 +85,26 @@ class SqlStore:
         return store
 
     @classmethod
-    def postgres(cls, database_url: str, migrations_dir: Path) -> "SqlStore":
+    def postgres(
+        cls,
+        database_url: str,
+        migrations_dir: Path,
+        schema: str | None = None,
+    ) -> "SqlStore":
         import psycopg
         from psycopg.rows import dict_row
 
-        conn = psycopg.connect(database_url, row_factory=dict_row)
+        options = None
+        if schema:
+            # The schema name is interpolated into SQL below, so it
+            # must be a bare identifier — nothing else is accepted.
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema):
+                raise ValueError(f"invalid Postgres schema name: {schema!r}")
+            options = f"-c search_path={schema}"
+        conn = psycopg.connect(database_url, row_factory=dict_row, options=options)
+        if schema:
+            conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+            conn.commit()
         store = cls(conn, "postgres", "format")
         run_migrations(conn, migrations_dir, "postgres", "format")
         return store
@@ -84,10 +118,10 @@ class SqlStore:
         row = self._run(sql, params).fetchone()
         if row is None:
             return None
-        return dict(row)
+        return _decode_row(dict(row))
 
     def _all(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
-        return [dict(r) for r in self._run(sql, params).fetchall()]
+        return [_decode_row(dict(r)) for r in self._run(sql, params).fetchall()]
 
     # -- facts ----------------------------------------------------------
     def get_fact_by_key(self, kind: str, natural_key: str) -> Fact | None:
@@ -227,6 +261,14 @@ class SqlStore:
             )
             for r in rows
         ]
+
+    def close(self) -> None:
+        """Close the underlying connection. A Postgres connection
+        that has read sits idle-in-transaction and holds its locks
+        until it ends — the parity leg and the prod smoke close
+        their stores before dropping their throwaway schemas
+        (Round 10 found a teardown hanging on exactly this)."""
+        self._conn.close()
 
     # -- health -------------------------------------------------------------
     def ping(self) -> bool:
