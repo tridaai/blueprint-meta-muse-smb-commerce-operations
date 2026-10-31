@@ -29,6 +29,24 @@ Every surface — API, CLI, demo, graph — talks to one
   method exists for facts, artefacts or call records. Bulk loads run
   in a single transaction via `SqlStore.batch()`; the per-item
   duplicate and conflict checks are unchanged inside the batch.
+  Round 10 made the dialect boundary honest at this layer: psycopg
+  returns text as bytes on a SQL_ASCII database, so rows are decoded
+  to text at the one materialisation point (`_one`/`_all`) — before
+  that, a second boot re-ran its migrations because b'0001' != '0001'.
+  An optional schema (`SMB_POSTGRES_SCHEMA`) scopes the store to one
+  schema of a shared database; `close()` ends the connection so its
+  idle-in-transaction locks cannot block a schema drop.
+- **Parity walk** (`parity.py`): the one definition of the core walk
+  (ingest -> ledger -> diagnoses -> plan -> drafts -> guardian ->
+  approvals -> morning board) and of the canonical snapshot it is
+  graded by. The in-suite Postgres leg
+  (`tests/test_postgres_parity.py`, gated on `SMB_TEST_DATABASE_URL`,
+  test-database name guard, own throwaway schema) and the production
+  smoke (`scripts/prod_smoke.py`, `make smoke`: fresh schema,
+  idempotent second boot, `/health` + `/readiness`, the walk, and a
+  byte-identical diff against a full SQLite walk) both call it, so
+  the two grades can never drift apart. Round 10's verdict on the
+  builder's run: parity gap 0.
 - **Migrations** (`migrations/`): numbered SQL files per dialect,
   applied in order at startup by `migrations.py` and recorded in
   `schema_migrations`. Comments never contain a semicolon (the runner

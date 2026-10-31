@@ -5,13 +5,14 @@
 #   make demo        generate the dataset and print the operating picture, offline
 #   make test        pytest
 #   make evals       eval gate, offline
+#   make smoke       production smoke against Postgres (needs DATABASE_URL)
 #   make serve       the API on http://localhost:8000
 #   make cli         the CLI surface (the ledger, as an example)
 #
 # No uv? python3 -m venv .venv && source .venv/bin/activate, then:
 #   make install-pip
 
-.PHONY: install install-pip demo test evals serve cli
+.PHONY: install install-pip demo test evals smoke serve cli
 
 install:
 	uv sync --extra dev
@@ -32,6 +33,9 @@ test:
 
 evals:
 	uv run python evals/run_evals.py
+
+smoke:
+	uv run python scripts/prod_smoke.py
 
 serve:
 	uv run uvicorn smb_commerce.api:app --port 8000
