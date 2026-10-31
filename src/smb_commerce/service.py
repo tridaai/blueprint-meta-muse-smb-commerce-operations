@@ -11,6 +11,7 @@ import logging
 
 from . import generator
 from .approvals import ApprovalService
+from .board import BoardService
 from .config import Settings, load_settings
 from .diagnosis import DiagnosisService
 from .drafting import DraftingService
@@ -44,6 +45,7 @@ class CommerceService:
         self.drafting = DraftingService(self.store, self.model)
         self.guardian = GuardianService(self.store, self.model)
         self.approvals = ApprovalService(self.store, self.guardian)
+        self.board = BoardService(self.store, self.guardian, self.approvals)
         self.objects: ObjectStore = build_object_store(self.settings)
 
     # -- dataset ---------------------------------------------------------
@@ -134,3 +136,10 @@ class CommerceService:
 
     def approval_history(self, draft_id):
         return self.approvals.history(draft_id)
+
+    # -- morning board -----------------------------------------------------
+    def morning_board(self):
+        return self.board.board()
+
+    def derive_board(self):
+        return self.board.derive()
