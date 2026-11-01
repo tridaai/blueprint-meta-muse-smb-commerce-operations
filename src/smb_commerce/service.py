@@ -14,6 +14,11 @@ recorded approval refusal) before any store lookup of their
 target. In-process flows — the demo, the eval gate, the graph,
 the parity walk — pass no caller and act as the stated internal
 identity; surfaces always resolve and pass one explicitly.
+
+Round 14 adds subscriptions and digests through the same
+boundary: the writes refuse loudly, and a digest read is decided
+by the digest's content — the caller must hold every permission
+the digest's included sections required (see ``digests.py``).
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from .config import Settings, load_settings
 from .connectors import ConnectorPort
 from .costs import CostAnalytics, empty_summary
 from .diagnosis import DiagnosisService
+from .digests import DIGEST_KIND, DigestService, digest_visible
 from .drafting import DraftingService
 from .guardian import GuardianService
 from .ingest import IngestPort, IngestReport
@@ -74,6 +80,7 @@ class CommerceService:
         self.guardian = GuardianService(self.store, self.model)
         self.approvals = ApprovalService(self.store, self.guardian)
         self.board = BoardService(self.store, self.guardian, self.approvals)
+        self.digests = DigestService(self.store, self.board)
         self.objects: ObjectStore = build_object_store(self.settings)
 
     # -- callers -----------------------------------------------------------
@@ -107,22 +114,38 @@ class CommerceService:
         artefact = self.store.get_artefact(artefact_id)
         if artefact is None:
             return None
+        caller = self._caller(caller)
+        if artefact.kind == DIGEST_KIND:
+            # An addressed digest: content, not the kind gate,
+            # decides (see digests.py).
+            return artefact if digest_visible(artefact, caller) else None
         permission = read_permission_for_kind(artefact.kind)
-        if not visible(self._caller(caller), permission):
+        if not visible(caller, permission):
             return None
         return artefact
 
     def read_artefacts(self, kind: str, caller: Caller | None = None):
         permission = read_permission_for_kind(kind)
-        if not visible(self._caller(caller), permission):
+        caller = self._caller(caller)
+        if not visible(caller, permission):
             return []
-        return self.store.list_artefacts(kind)
+        artefacts = self.store.list_artefacts(kind)
+        if kind == DIGEST_KIND:
+            artefacts = [
+                a for a in artefacts if digest_visible(a, caller)]
+        return artefacts
 
     def read_latest_artefact(self, kind: str,
                              caller: Caller | None = None):
         permission = read_permission_for_kind(kind)
-        if not visible(self._caller(caller), permission):
+        caller = self._caller(caller)
+        if not visible(caller, permission):
             return None
+        if kind == DIGEST_KIND:
+            visible_digests = [
+                a for a in self.store.list_artefacts(kind)
+                if digest_visible(a, caller)]
+            return visible_digests[-1] if visible_digests else None
         return self.store.latest_artefact(kind)
 
     def read_ledger(self, caller: Caller | None = None):
@@ -349,3 +372,52 @@ class CommerceService:
     def derive_board(self, caller: Caller | None = None):
         require(self._caller(caller), "board:read")
         return self.board.derive()
+
+    # -- subscriptions and digests (Round 14) ------------------------------
+    # Writes are actions and refuse loudly; reads answer with the
+    # absent form. A digest read is decided by the digest's
+    # content — the permissions its included sections required —
+    # never by who it was addressed to alone.
+
+    def subscribe_digest(self, actor: str, role: str, cadence: str,
+                         caller: Caller | None = None):
+        require(self._caller(caller), "subscriptions:write")
+        return self.digests.subscribe(actor, role, cadence)
+
+    def unsubscribe_digest(self, actor: str, role: str, cadence: str,
+                           caller: Caller | None = None):
+        require(self._caller(caller), "subscriptions:write")
+        return self.digests.unsubscribe(actor, role, cadence)
+
+    def read_subscriptions(self, caller: Caller | None = None):
+        if not visible(self._caller(caller), "subscriptions:read"):
+            return []
+        return self.digests.subscriptions()
+
+    def generate_digests(self, cadence: str,
+                         period_end: str | None = None,
+                         caller: Caller | None = None):
+        require(self._caller(caller), "digests:generate")
+        return self.digests.generate(cadence, period_end)
+
+    def read_digest(self, artefact_id: str,
+                    caller: Caller | None = None):
+        artefact = self.store.get_artefact(artefact_id)
+        if artefact is None or artefact.kind != DIGEST_KIND:
+            return None
+        if not digest_visible(artefact, self._caller(caller)):
+            return None
+        return artefact
+
+    def read_digests(self, cadence: str | None = None,
+                     caller: Caller | None = None):
+        caller = self._caller(caller)
+        if not visible(caller, "digests:read"):
+            return []
+        return [
+            artefact
+            for artefact in self.store.list_artefacts(DIGEST_KIND)
+            if digest_visible(artefact, caller)
+            and (cadence is None
+                 or artefact.payload["cadence"] == cadence)
+        ]

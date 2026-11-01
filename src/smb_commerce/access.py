@@ -50,6 +50,24 @@ refusal identical for real and absent target ids. A role-gated
 approval attempt is recorded like every refused approval: as an
 approval-refusal artefact naming the actor and the problem.
 
+Digests (Round 14)
+------------------
+The pack gains the digest permissions. ``digests:read`` is held
+by every staff role — a digest is an *addressed* artefact whose
+payload is assembled for one role out of only the sections that
+role may read, so the kind gate alone cannot be the rule: the
+service additionally requires the caller to hold **every**
+permission the digest's included sections required (see
+``digests.py``). Content, not address, decides: the bookkeeper
+reads the bookkeeper digest (headline + costs — the permissions
+they hold), never the owner digest (which also carries the plan
+findings and the approval picture), and the viewer's digest —
+which includes no section at all — is readable by the viewer
+precisely because there is nothing in it they may not see.
+Generating digests and writing subscriptions are actions, gated
+like the pipeline runs (owner + operator); reading the
+subscription record is owner + operator — it names the staff.
+
 The internal caller
 -------------------
 In-process flows — the demo, the eval gate, the LangGraph loop,
@@ -97,6 +115,16 @@ ACCESS_PACK: dict[str, frozenset[str]] = {
     "screen:run": frozenset({"owner", "operator"}),
     # The named human act (Law 2): the owner only.
     "approvals:act": frozenset({"owner"}),
+    # Digests (Round 14). The kind gate for an addressed digest
+    # artefact: every staff role — the service additionally
+    # requires the caller to hold every permission the digest's
+    # included sections required, so content decides (see the
+    # module docstring). Generation and the subscription record
+    # are operations surfaces: owner + operator.
+    "digests:read": frozenset(ROLES),
+    "digests:generate": frozenset({"owner", "operator"}),
+    "subscriptions:read": frozenset({"owner", "operator"}),
+    "subscriptions:write": frozenset({"owner", "operator"}),
 }
 
 PERMISSIONS = tuple(ACCESS_PACK)
@@ -125,6 +153,8 @@ _ARTEFACT_READ_PERMISSIONS: dict[str, str] = {
     "approval_refusal": "approvals:read",
     "connector_quarantine": "connectors:read",
     "context_assembly": "costs:read",
+    "ops_digest": "digests:read",
+    "digest_subscription": "subscriptions:read",
 }
 
 
