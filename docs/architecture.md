@@ -261,10 +261,65 @@ service enforces it the same way for all of them.
   `subscribe`, `unsubscribe`, `digest-generate`, `digests`,
   `digest-verify`; the parity walk generates both cadences, so
   digests sit inside the byte-identical snapshot.
+- **Review packs** (`reviewpacks.py`, Round 17): the monthly
+  financial review pack, its export and its publication gate. A
+  pack is a stored, insert-only, content-addressed artefact for
+  a stated month (`YYYY-MM`, validated), folded whole in code
+  from the record — headline and SKU/ad detail from the head
+  ledger, the plan's ranked findings and stock risks, the
+  listing summary, the approval picture, the cost summary —
+  every figure citing its source artefact and the folded heads
+  pinned on its face. The section-to-permission table is stated
+  in the module (headline and detail `ledger:read`, findings
+  and stock risks `plan:read`, listing `diagnosis:read`,
+  approvals `approvals:read`, costs `costs:read`); because the
+  pack is assembled whole rather than per role, its reads are
+  content-gated on all of them, so the bookkeeper and the
+  viewer answer as absent. The grain is stated on the pack:
+  the record holds no per-month ledger, so figures are the
+  record as of the head ledger and the month is the pinned
+  reporting label — the Round 14 digest grain. Verification
+  re-performs by a second route: explicit figure re-resolution
+  (headline against the cited ledger, detail canonically,
+  findings against their cited diagnosis sets, the listing
+  restatement against its artefact, pins against the record),
+  then a fresh fold compared section by section. The export is
+  one deterministic JSON document rendered from the pack —
+  sections, the publication state at export time, a provenance
+  appendix (every figure with source artefact id and as-of; the
+  cost figures cite the model-call ledger, no single artefact
+  carrying them) and a checksum manifest (SHA-256 over the
+  export body and over each referenced artefact's canonical
+  form) — its bytes stored through the object-store port under
+  a content-addressed key and recorded as an export artefact.
+  Export verification re-computes the body checksum,
+  re-performs the manifest against the stored artefacts,
+  rebuilds the appendix from the pack and re-resolves every
+  figure in it. Publication follows the Round 8 machinery's
+  patterns: an insert-only act performed by a named human,
+  bound to the pack's content hash (`sha256` of its canonical
+  payload) and its folded pins, gated `packs:publish` (the
+  owner, exactly as `approvals:act`), a presented caller
+  publishing only in their own name, refusals recorded as
+  artefacts; published status is the fold of the acts that
+  pass `verify_publication` — a forged act confers nothing —
+  and a publication whose bound pins have moved, or that a
+  newer same-month pack supersedes, reads stale with the
+  moved inputs named. Generation is gated `packs:generate`;
+  pack and export generation are content-idempotent, so the
+  parity walk's generate -> export -> publish sequence sits
+  inside the byte-identical snapshot. Surfaces:
+  `/review-packs/generate`, `/review-packs`, `/review-packs/{id}`,
+  `/review-packs/{id}/verify`, `/review-packs/{id}/status`,
+  `/review-packs/{id}/export`, `/review-packs/{id}/publish`,
+  `/review-pack-exports/{id}`, `/review-pack-exports/{id}/verify`;
+  CLI `review-pack-generate`, `review-packs`, `review-pack-verify`,
+  `review-pack-status`, `review-pack-export`, `review-pack-exports`,
+  `review-pack-export-verify`, `review-pack-publish`.
 - **Object store port** (`objectstore.py`): filesystem by default,
   S3-compatible adapter when `SMB_S3_ENDPOINT` is set; the adapter
   fails closed on incomplete configuration. Round 1 wires the port;
-  report packs use it from Round 17.
+  the Round 17 review-pack exports store their bytes through it.
 - **Graph** (`graph.py`): a LangGraph `StateGraph` whose nodes pass
   counts and artefact ids, never figures. Round 2 inserted the
   diagnose node between compute and verify; Round 4 extended it to

@@ -9,6 +9,7 @@ offline profile and lands in the cost ledger like any other call.
 
 from __future__ import annotations
 
+import json
 import tempfile
 from copy import deepcopy
 from decimal import Decimal
@@ -20,6 +21,7 @@ from .approvals import ApprovalRefused
 from .config import Settings, load_settings
 from .guardian import draft_content_hash
 from .models import Artefact
+from .reviewpacks import PackPublicationRefused
 from .service import CommerceService
 
 
@@ -555,6 +557,63 @@ def main() -> int:
         print("  digests are generated into the record and read"
               " back through the surfaces — nothing is sent"
               " anywhere")
+
+        print("\n== Monthly review pack — the month, exported"
+              " and published ==")
+        head_ledger = service.store.latest_artefact("ledger")
+        month = head_ledger.payload["as_of"][:7]
+        pack = service.generate_review_pack(month)
+        print(f"  pack {pack.artefact_id} for {month}:"
+              f"  sections {', '.join(pack.payload['sections_included'])}"
+              f"  verified {not service.review_packs.verify(pack)}")
+        document_probe = service.read_review_pack(
+            pack.artefact_id, Caller("Bea Bookkeeper", "bookkeeper"))
+        print(f"  the bookkeeper probes the pack:"
+              f" {'found' if document_probe else 'not found'}"
+              " — the pack carries findings and approvals she"
+              " may not read, so it answers as absent")
+        export = service.export_review_pack(pack.artefact_id)
+        document = json.loads(service.objects.get(
+            export.payload["object_key"]))
+        print(f"  export {export.artefact_id}:"
+              f"  {len(document['provenance_appendix'])} figures"
+              " in the provenance appendix,"
+              f"  {len(document['checksum_manifest'])} artefacts"
+              " in the checksum manifest,"
+              f"  verified {not service.review_packs.verify_export(export)}")
+        key = export.payload["object_key"]
+        genuine = service.objects.get(key)
+        service.objects.put(key, genuine.replace(
+            b'"month":"2026-01"', b'"month":"2026-02"', 1))
+        print(f"  one byte changed in the stored export:"
+              f"  verify answers"
+              f" {service.review_packs.verify_export(export)}")
+        service.objects.put(key, genuine)
+        print(f"  the genuine bytes restored:"
+              f"  verified {not service.review_packs.verify_export(export)}")
+        try:
+            service.publish_review_pack(
+                pack.artefact_id, "Omar Operator",
+                caller=Caller("Omar Operator", "operator"))
+            print("  the operator published the pack — WRONG")
+        except PackPublicationRefused as refused:
+            print(f"  the operator tries to publish:"
+                  f"  refused and recorded as"
+                  f" {refused.refusal.artefact_id}"
+                  f" ({', '.join(refused.refusal.payload['problems'])})")
+        before = service.review_pack_status(pack.artefact_id)
+        act = service.publish_review_pack(
+            pack.artefact_id, "Maya Chen",
+            caller=Caller("Maya Chen", "owner"))
+        after = service.review_pack_status(pack.artefact_id)
+        print(f"  status: {before['status']} -> published by"
+              f" {act.payload['publisher']} ({act.artefact_id}),"
+              f"  bound to pack hash"
+              f" {act.payload['pack_content_hash'][:12]}...,"
+              f"  stale: {after['stale']}")
+        print("  publication records the pack as published in"
+              " the record — the pack itself is distributed"
+              " nowhere")
 
         print("\n== Access control — the record answers to roles ==")
         print(f"  access pack {ACCESS_PACK_VERSION}"
