@@ -27,13 +27,15 @@ A caller is a named actor plus a role, resolved once per call by
 :func:`resolve_caller` — the same function for both surfaces
 (the ``X-SMB-Actor`` / ``X-SMB-Role`` headers on the API, the
 ``--actor`` / ``--role`` flags on the CLI) — and passed to the
-service, which refuses what the pack refuses. This is the
-blueprint's access-control layer, **not** an identity provider:
-nothing here proves the caller is who they claim. Scoped tokens
-(Round 18) will authenticate a presented identity and resolve to
-the same :class:`Caller`; until then the honest statement is
-that roles bind callers who present them, inside a deployment
-that trusts its callers to do so.
+service, which refuses what the pack refuses. On its own this
+layer is **not** an identity provider: nothing in a presented
+identity proves the caller is who they claim. Scoped tokens
+(Round 18, ``tokens.py``) are the authentication layer over it:
+a bearer string resolves to the same :class:`Caller`, narrowed
+by the token's scopes. The honest statement is that presented
+roles bind callers who present them, inside a deployment that
+trusts its callers to do so — and token-authenticated callers
+no longer need that trust.
 
 Existence hiding
 ----------------
@@ -85,6 +87,27 @@ operator; publishing one is the named human act over the pack
 and is reserved to the owner, like ``approvals:act`` — the
 operator may assemble the month's pack but may not publish
 what their own pipeline produced.
+
+Tokens and webhooks (Round 18)
+------------------------------
+The pack gains four permissions. Token records are credential
+metadata — they name a staff member and the scopes a bearer
+string carries — so ``tokens:read`` and ``tokens:issue``
+(issuance and revocation alike) are the owner's alone.
+Webhook subscriptions name an external URL and the events it
+hears about, so ``webhooks:write`` (subscribe, unsubscribe) is
+the owner's alone too; ``webhooks:read`` (subscriptions and
+delivery records — neither carries the signing secret) is
+owner + operator.
+
+A token-authenticated caller is the same :class:`Caller` with
+``scopes`` set: the effective permission is the intersection —
+the role must hold the permission **and** the permission must
+be in the token's scope set — so a token can narrow the role
+it was issued under, never widen it. ``scopes is None`` is the
+presented identity of Rounds 13–17, unscoped. Resolution of a
+bearer string to a caller lives in ``tokens.py``; this module
+stays the pure statement of who may do what.
 
 The internal caller
 -------------------
@@ -153,6 +176,19 @@ ACCESS_PACK: dict[str, frozenset[str]] = {
     "packs:read": frozenset(ROLES),
     "packs:generate": frozenset({"owner", "operator"}),
     "packs:publish": frozenset({"owner"}),
+    # Tokens (Round 18). A token record is credential metadata:
+    # it names a staff member and the scopes their bearer string
+    # carries. Reading the token record and issuing or revoking
+    # tokens are the owner's alone.
+    "tokens:read": frozenset({"owner"}),
+    "tokens:issue": frozenset({"owner"}),
+    # Webhooks (Round 18). A subscription names an external URL
+    # and the events it hears about; writing one is the owner's
+    # alone. Reads (subscriptions, delivery records) carry no
+    # secret — the signing secret never reads back — and are
+    # owner + operator.
+    "webhooks:read": frozenset({"owner", "operator"}),
+    "webhooks:write": frozenset({"owner"}),
 }
 
 PERMISSIONS = tuple(ACCESS_PACK)
@@ -189,6 +225,11 @@ _ARTEFACT_READ_PERMISSIONS: dict[str, str] = {
     "review_pack_export": "packs:read",
     "review_pack_publication": "packs:read",
     "review_pack_publication_refusal": "packs:read",
+    "api_token": "tokens:read",
+    "api_token_revocation": "tokens:read",
+    "api_token_refusal": "tokens:read",
+    "webhook_subscription": "webhooks:read",
+    "webhook_delivery": "webhooks:read",
 }
 
 
@@ -204,13 +245,22 @@ def read_permission_for_kind(kind: str) -> str:
 
 @dataclass(frozen=True)
 class Caller:
-    """A presented identity: a named actor acting in one role.
+    """An identity: a named actor acting in one role.
 
     ``actor`` empty or ``role`` None is the anonymous caller,
-    which holds no permission."""
+    which holds no permission.
+
+    ``scopes is None`` is a presented identity (Rounds 13–17):
+    the role's permissions are the caller's. A token-authenticated
+    caller (Round 18) carries the token's ``scopes`` and its
+    ``token_id``: its effective permissions are the intersection
+    of the role's and the scope set, so a token narrows the role
+    it was issued under and can never widen it."""
 
     actor: str = ""
     role: str | None = None
+    scopes: frozenset[str] | None = None
+    token_id: str | None = None
 
     @property
     def identified(self) -> bool:
@@ -219,11 +269,15 @@ class Caller:
     def allows(self, permission: str) -> bool:
         if not self.identified:
             return False
-        return self.role in ACCESS_PACK[permission]
+        if self.role not in ACCESS_PACK[permission]:
+            return False
+        return self.scopes is None or permission in self.scopes
 
     def describe(self) -> str:
         if not self.identified:
             return "anonymous"
+        if self.token_id:
+            return f"{self.actor} ({self.role}) via token {self.token_id}"
         return f"{self.actor} ({self.role})"
 
 

@@ -31,6 +31,12 @@ class Settings:
     # path's default — the prod smoke and the parity leg use it to
     # run in a throwaway schema of a shared test database.
     postgres_schema: str = ""
+    # Round 18: the deployment key under which webhook signing
+    # secrets are encrypted at rest (see webhooks.py). It lives in
+    # configuration, never in the record; empty selects the stated
+    # local development key, which protects nothing and exists so
+    # the local profile runs without ceremony.
+    webhook_key: str = ""
 
     @property
     def use_postgres(self) -> bool:
@@ -67,4 +73,5 @@ def load_settings() -> Settings:
         model_tier=tier,
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         postgres_schema=os.environ.get("SMB_POSTGRES_SCHEMA", ""),
+        webhook_key=os.environ.get("SMB_WEBHOOK_KEY", ""),
     )
