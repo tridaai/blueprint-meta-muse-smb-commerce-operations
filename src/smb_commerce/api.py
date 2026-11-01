@@ -45,6 +45,26 @@ export reads (`/review-pack-exports/{id}`,
 `/review-pack-exports/{id}/verify`). Pack and export reads are
 gated by the pack's content exactly as the service gates them —
 a forbidden pack and a missing pack return the same 404.
+
+Round 18 adds authentication and the webhook surface. A caller
+may present a scoped token instead of the identity headers —
+the `X-SMB-Token` header, or an `Authorization: Bearer` value —
+and `_caller` resolves it through the service to the same
+`Caller` the headers would produce, narrowed by the token's
+scopes; a token that does not verify resolves to anonymous and
+fails closed (presenting a token opts into token
+authentication — there is no fallback to the headers). The
+token endpoints (`POST /tokens` — the one response that ever
+shows a bearer string — `GET /tokens`, `GET /tokens/{token_id}`,
+`POST /tokens/{token_id}/revoke`) are the owner's alone. The
+webhook endpoints (`POST /webhooks` — the one response that
+ever shows a signing secret — `GET /webhooks`,
+`GET /webhooks/{subscription_id}`,
+`POST /webhooks/{subscription_id}/unsubscribe`,
+`GET /webhook-deliveries`,
+`GET /webhook-deliveries/{delivery_id}/verify`) sit behind the
+pack the same way; deliveries are read back and re-verified
+here, never delivered from here.
 """
 
 from __future__ import annotations
@@ -78,10 +98,23 @@ def get_service() -> CommerceService:
 
 
 def _caller(request: Request) -> Caller:
-    """The presented identity on this request, resolved the one
-    way both surfaces resolve it. Missing or unstated identity
-    resolves to the anonymous caller, which the pack refuses
-    everywhere on the record."""
+    """The caller on this request, resolved the one way both
+    surfaces resolve it. A presented token — the `X-SMB-Token`
+    header or an `Authorization: Bearer` value — authenticates
+    through the service and decides the caller on its own: a
+    token that does not verify resolves to the anonymous
+    caller, never to a fallback over the identity headers.
+    Without a token, the presented identity resolves from the
+    `X-SMB-Actor` / `X-SMB-Role` headers, and a missing or
+    unstated identity resolves to the anonymous caller, which
+    the pack refuses everywhere on the record."""
+    token = request.headers.get("X-SMB-Token")
+    if not token:
+        authorization = request.headers.get("Authorization", "")
+        if authorization.startswith("Bearer "):
+            token = authorization[len("Bearer "):]
+    if token:
+        return get_service().authenticate_token(token.strip())
     return resolve_caller(
         request.headers.get("X-SMB-Actor"),
         request.headers.get("X-SMB-Role"),
@@ -924,3 +957,160 @@ def verify_review_pack_export(export_id: str,
                             detail="review pack export not found")
     return {"artefact_id": export_id,
             "verified": not problems, "problems": problems}
+
+
+class IssueTokenRequest(BaseModel):
+    actor: str
+    role: str
+    scopes: list[str]
+    ttl_seconds: int | None = None
+
+
+@app.post("/tokens")
+def issue_token(body: IssueTokenRequest, request: Request) -> dict:
+    """Issue a scoped token to a named actor. This response is
+    the one place a bearer string is ever shown — the record
+    keeps only its salted hash. Owner only; every refusal is
+    the pack's or the token policy's, stated."""
+    service = get_service()
+    try:
+        issued = service.issue_token(
+            body.actor, body.role, body.scopes,
+            ttl_seconds=body.ttl_seconds, caller=_caller(request))
+    except AccessRefused as refused:
+        raise _forbidden(refused)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    metadata = service.tokens.metadata(issued.artefact)
+    return {**metadata, "bearer": issued.bearer}
+
+
+@app.get("/tokens")
+def list_tokens(request: Request) -> dict:
+    """The token record as metadata — id, actor, role, scopes,
+    issued/expiry, derived status. Owner only: any other role
+    gets the empty list."""
+    service = get_service()
+    tokens = service.read_tokens(_caller(request))
+    return {"count": len(tokens), "tokens": tokens}
+
+
+@app.get("/tokens/{token_id}")
+def get_token(token_id: str, request: Request) -> dict:
+    service = get_service()
+    metadata = service.read_token(token_id, _caller(request))
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="token not found")
+    return metadata
+
+
+@app.post("/tokens/{token_id}/revoke")
+def revoke_token(token_id: str, request: Request) -> dict:
+    """Record a token's revocation — a new record, nothing
+    deleted. Owner only; the gate fires before any lookup, so
+    the refusal is the same for real and absent token ids."""
+    service = get_service()
+    try:
+        artefact = service.revoke_token(
+            token_id, caller=_caller(request))
+    except AccessRefused as refused:
+        raise _forbidden(refused)
+    if artefact is None:
+        raise HTTPException(status_code=404, detail="token not found")
+    return service.read_token(token_id, _caller(request))
+
+
+class SubscribeWebhookRequest(BaseModel):
+    url: str
+    events: list[str]
+    signing_secret: str | None = None
+
+
+@app.post("/webhooks")
+def subscribe_webhook(body: SubscribeWebhookRequest,
+                      request: Request) -> dict:
+    """Record a webhook subscription. This response is the one
+    place a signing secret is ever shown, and only when the
+    subscription is newly created with a generated secret.
+    Owner only."""
+    service = get_service()
+    try:
+        artefact, secret = service.subscribe_webhook(
+            body.url, body.events,
+            signing_secret=body.signing_secret,
+            caller=_caller(request))
+    except AccessRefused as refused:
+        raise _forbidden(refused)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    metadata = service.webhooks.metadata(artefact)
+    if secret is not None:
+        metadata = {**metadata, "signing_secret": secret}
+    return metadata
+
+
+@app.get("/webhooks")
+def list_webhooks(request: Request) -> dict:
+    """The folded subscription record as metadata — never a
+    secret, never a ciphertext. Roles that may not read it get
+    the empty list."""
+    service = get_service()
+    subscriptions = service.read_webhooks(_caller(request))
+    return {"count": len(subscriptions),
+            "webhooks": subscriptions}
+
+
+@app.get("/webhooks/{subscription_id}")
+def get_webhook(subscription_id: str, request: Request) -> dict:
+    service = get_service()
+    metadata = service.read_webhook(subscription_id, _caller(request))
+    if metadata is None:
+        raise HTTPException(status_code=404,
+                            detail="webhook subscription not found")
+    return metadata
+
+
+@app.post("/webhooks/{subscription_id}/unsubscribe")
+def unsubscribe_webhook(subscription_id: str,
+                        request: Request) -> dict:
+    """Supersede a subscription with its inactive state. Owner
+    only; the gate fires before any lookup."""
+    service = get_service()
+    try:
+        artefact = service.unsubscribe_webhook(
+            subscription_id, caller=_caller(request))
+    except AccessRefused as refused:
+        raise _forbidden(refused)
+    if artefact is None:
+        raise HTTPException(
+            status_code=404,
+            detail="webhook subscription not found")
+    return service.webhooks.metadata(artefact)
+
+
+@app.get("/webhook-deliveries")
+def list_webhook_deliveries(request: Request,
+                            subscription_id: str | None = None
+                            ) -> dict:
+    """The recorded delivery attempts: subscription, event,
+    attempt, outcome, response class, and the signed body as
+    sent — ids and actors, never figures."""
+    service = get_service()
+    deliveries = service.read_webhook_deliveries(
+        subscription_id, _caller(request))
+    return {"count": len(deliveries), "deliveries": deliveries}
+
+
+@app.get("/webhook-deliveries/{delivery_id}/verify")
+def verify_webhook_delivery(delivery_id: str,
+                            request: Request) -> dict:
+    """Re-perform a recorded delivery's signature against its
+    subscription's secret — the check a receiver runs, served
+    for a delivery already on the record."""
+    service = get_service()
+    verified = service.verify_webhook_delivery(
+        delivery_id, _caller(request))
+    if verified is None:
+        raise HTTPException(status_code=404,
+                            detail="webhook delivery not found")
+    return {"delivery_id": delivery_id, "verified": verified}

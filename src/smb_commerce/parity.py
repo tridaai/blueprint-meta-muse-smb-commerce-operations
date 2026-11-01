@@ -39,12 +39,40 @@ from the pack) and the publication act are graded byte-identical
 on both profiles too. The export's bytes live in each profile's
 own object store, like the image bytes; the snapshot grades the
 record of them.
+
+Round 18 extends the walk to the authenticated record: issue a
+scoped token to the operator, subscribe a webhook to pack
+publications, publish a second month's pack (which fires the
+event and records the delivery), and revoke the token. The
+token and webhook services take their clock and entropy as
+seams; the walk states both (a fixed clock, a deterministic
+byte source), states the subscription's signing secret, and
+replaces the HTTP delivery port with a local double receiver —
+so the token, revocation, subscription and delivery artefacts
+are content on both profiles too, and no real call is made.
 """
 
 from __future__ import annotations
 
+import itertools
+
 from .service import CommerceService
 from .store import canonical_json
+from .webhooks import LocalReceiver
+
+
+def _stated_entropy():
+    """A deterministic byte source for the walk's token and
+    webhook seams: the same draws, in the same order, on every
+    profile — the generator's stated-data pattern applied to
+    the services' entropy seam."""
+    counter = itertools.count()
+
+    def draw(size: int) -> bytes:
+        start = next(counter) * 64
+        return bytes((start + i) % 256 for i in range(size))
+
+    return draw
 
 
 def run_core_walk(service: CommerceService):
@@ -78,6 +106,24 @@ def run_core_walk(service: CommerceService):
     pack = service.generate_review_pack(board.payload["as_of"][:7])
     service.export_review_pack(pack.artefact_id)
     service.publish_review_pack(pack.artefact_id, "parity-owner")
+    # Round 18: the authenticated record. The seams are stated
+    # first, so everything below is content: the token's salt
+    # and secret, the subscription's encryption nonce, the
+    # delivery's timestamp and signature.
+    service.tokens.clock = lambda: "2026-01-04T00:00:00+00:00"
+    service.tokens.entropy = _stated_entropy()
+    service.webhooks.clock = lambda: "2026-01-04T00:00:00+00:00"
+    service.webhooks.entropy = _stated_entropy()
+    service.webhooks.deliver = LocalReceiver("parity-webhook-secret")
+    issued = service.issue_token(
+        "parity-operator", "operator", ["costs:read", "facts:read"])
+    service.subscribe_webhook(
+        "https://hooks.example.invalid/smb-commerce",
+        ["review_pack_published"],
+        signing_secret="parity-webhook-secret")
+    second_pack = service.generate_review_pack("2026-02")
+    service.publish_review_pack(second_pack.artefact_id, "parity-owner")
+    service.revoke_token(issued.token_id)
     return board
 
 

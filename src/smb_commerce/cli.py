@@ -10,7 +10,9 @@ model-calls, model-profile, costs, contexts, subscriptions,
 subscribe, unsubscribe, digests, digest-generate, digest-verify,
 review-packs, review-pack-generate, review-pack-verify,
 review-pack-export, review-pack-exports, review-pack-status,
-review-pack-publish, review-pack-export-verify.
+review-pack-publish, review-pack-export-verify, tokens,
+token-issue, token-revoke, webhooks, webhook-subscribe,
+webhook-unsubscribe, webhook-deliveries, webhook-verify.
 The
 diagnose commands cover all six diagnoses (stockout, ad decay,
 expense anomalies, refund anomalies, the email-flow audit, and
@@ -59,6 +61,21 @@ the content gate (`review-packs`, `review-pack-verify`,
 publication act (`review-pack-publish --pack`, the publisher
 defaulting to the caller's own actor). Publication is recorded
 in the record; nothing is distributed anywhere.
+
+Round 18: `--token` authenticates the CLI's caller with a
+scoped token, resolved through the service exactly as the API
+resolves it — a token that does not verify resolves to
+anonymous and fails closed. `token-issue` (`--subject`,
+`--subject-role`, `--scopes`, optional `--ttl-seconds`) prints
+the bearer string once; `tokens` and `token-revoke` read and
+revoke the record as metadata. The webhook commands record
+and read subscriptions (`webhook-subscribe --url --events`,
+the signing secret printed once, `--signing-secret` to state
+one; `webhooks`; `webhook-unsubscribe --subscription`) and
+read back and re-verify deliveries (`webhook-deliveries`,
+`webhook-verify --delivery`). The CLI delivers nothing: the
+deliveries it reads were dispatched by the service, in a real
+deployment over HTTP, in the demo and tests to a local double.
 """
 
 from __future__ import annotations
@@ -374,7 +391,10 @@ def main(argv: list[str] | None = None) -> int:
         "digest-verify", "review-packs", "review-pack-generate",
         "review-pack-verify", "review-pack-export",
         "review-pack-exports", "review-pack-status",
-        "review-pack-publish", "review-pack-export-verify"])
+        "review-pack-publish", "review-pack-export-verify",
+        "tokens", "token-issue", "token-revoke", "webhooks",
+        "webhook-subscribe", "webhook-unsubscribe",
+        "webhook-deliveries", "webhook-verify"])
     parser.add_argument("--kind", default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--draft", default=None)
@@ -393,14 +413,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--note", default="")
     parser.add_argument("--actor", default=None)
     parser.add_argument("--role", default=None)
+    parser.add_argument("--token", default=None)
+    parser.add_argument("--token-id", default=None)
+    parser.add_argument("--subject", default=None)
+    parser.add_argument("--subject-role", default=None)
+    parser.add_argument("--scopes", default=None)
+    parser.add_argument("--ttl-seconds", type=int, default=None)
+    parser.add_argument("--url", default=None)
+    parser.add_argument("--events", default=None)
+    parser.add_argument("--subscription", default=None)
+    parser.add_argument("--delivery", default=None)
+    parser.add_argument("--signing-secret", default=None)
     args = parser.parse_args(argv)
 
     service = CommerceService()
-    # The surface caller: the internal identity when no identity
-    # flags are given (the terminal operator), else the presented
-    # identity resolved the one shared way — a partial identity
-    # resolves to anonymous and fails closed.
-    if args.actor is None and args.role is None:
+    # The surface caller: a presented token authenticates
+    # through the service and decides the caller on its own; else
+    # the internal identity when no identity flags are given (the
+    # terminal operator), else the presented identity resolved
+    # the one shared way — a partial identity resolves to
+    # anonymous and fails closed.
+    if args.token:
+        caller = service.authenticate_token(args.token)
+    elif args.actor is None and args.role is None:
         caller = INTERNAL_CALLER
     else:
         caller = resolve_caller(args.actor, args.role)
@@ -1032,6 +1067,130 @@ def main(argv: list[str] | None = None) -> int:
               f" published by {act.payload['publisher']}"
               " — recorded in the record, distributed nowhere")
         return 0
+    if args.command == "token-issue":
+        if not args.subject or not args.subject_role or not args.scopes:
+            print("token-issue requires --subject, --subject-role"
+                  " and --scopes")
+            return 2
+        try:
+            issued = service.issue_token(
+                args.subject, args.subject_role,
+                [s.strip() for s in args.scopes.split(",") if s.strip()],
+                ttl_seconds=args.ttl_seconds, caller=caller)
+        except AccessRefused as refused:
+            print(f"REFUSED token-issue: {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
+        except ValueError as error:
+            print(f"REFUSED token-issue: {error}")
+            return 1
+        p = issued.artefact.payload
+        print(f"{issued.token_id} for {p['actor']} ({p['role']})"
+              f" scopes {', '.join(p['scopes'])}"
+              f" expires {p['expires_at']}")
+        print(f"bearer (shown once): {issued.bearer}")
+        return 0
+    if args.command == "tokens":
+        tokens = service.read_tokens(caller)
+        for entry in tokens:
+            print(f"{entry['token_id']} {entry['actor']}"
+                  f" ({entry['role']}) scopes"
+                  f" {', '.join(entry['scopes'])}"
+                  f" issued {entry['issued_at']}"
+                  f" expires {entry['expires_at']}"
+                  f" — {entry['status']}")
+        print(f"{len(tokens)} tokens")
+        return 0
+    if args.command == "token-revoke":
+        if not args.token_id:
+            print("token-revoke requires --token-id")
+            return 2
+        try:
+            artefact = service.revoke_token(args.token_id, caller)
+        except AccessRefused as refused:
+            print(f"REFUSED token-revoke: {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
+        if artefact is None:
+            print("no such token")
+            return 1
+        metadata = service.read_token(args.token_id, caller)
+        print(f"{args.token_id} — {metadata['status']}"
+              f" (revocation {artefact.artefact_id})")
+        return 0
+    if args.command == "webhook-subscribe":
+        if not args.url or not args.events:
+            print("webhook-subscribe requires --url and --events")
+            return 2
+        try:
+            artefact, secret = service.subscribe_webhook(
+                args.url,
+                [e.strip() for e in args.events.split(",") if e.strip()],
+                signing_secret=args.signing_secret, caller=caller)
+        except AccessRefused as refused:
+            print(f"REFUSED webhook-subscribe:"
+                  f" {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
+        except ValueError as error:
+            print(f"REFUSED webhook-subscribe: {error}")
+            return 1
+        p = artefact.payload
+        print(f"{p['subscription_id']} {p['url']}"
+              f" events {', '.join(p['events'])}"
+              f" — {'active' if p['active'] else 'inactive'}")
+        if secret is not None:
+            print(f"signing secret (shown once): {secret}")
+        return 0
+    if args.command == "webhooks":
+        subscriptions = service.read_webhooks(caller)
+        for entry in subscriptions:
+            print(f"{entry['subscription_id']} {entry['url']}"
+                  f" events {', '.join(entry['events'])}"
+                  f" — {'active' if entry['active'] else 'inactive'}")
+        print(f"{len(subscriptions)} webhook subscriptions")
+        return 0
+    if args.command == "webhook-unsubscribe":
+        if not args.subscription:
+            print("webhook-unsubscribe requires --subscription")
+            return 2
+        try:
+            artefact = service.unsubscribe_webhook(
+                args.subscription, caller)
+        except AccessRefused as refused:
+            print(f"REFUSED webhook-unsubscribe:"
+                  f" {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
+        if artefact is None:
+            print("no active subscription of that id")
+            return 1
+        print(f"{args.subscription} — inactive"
+              f" (superseded by {artefact.artefact_id})")
+        return 0
+    if args.command == "webhook-deliveries":
+        deliveries = service.read_webhook_deliveries(
+            args.subscription, caller)
+        for entry in deliveries:
+            print(f"{entry['delivery_id']}"
+                  f" {entry['subscription_id']} {entry['event']}"
+                  f" attempt {entry['attempt']} — {entry['outcome']}"
+                  f" ({entry['response_class']})")
+        print(f"{len(deliveries)} webhook deliveries")
+        return 0
+    if args.command == "webhook-verify":
+        if not args.delivery:
+            print("webhook-verify requires --delivery")
+            return 2
+        verified = service.verify_webhook_delivery(
+            args.delivery, caller)
+        if verified is None:
+            print(json.dumps({"verified": False,
+                              "problems": ["no_webhook_delivery"]}))
+            return 1
+        print(json.dumps({"delivery_id": args.delivery,
+                          "verified": verified}))
+        return 0 if verified else 1
     return 2
 
 
