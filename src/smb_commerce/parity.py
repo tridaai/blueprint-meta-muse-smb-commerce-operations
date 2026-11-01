@@ -18,6 +18,14 @@ the bookkeeper to the daily digest and the operator to the weekly,
 then generate both cadences — so the subscription fold and the
 per-role digest artefacts are graded byte-identical on both
 profiles too, inside the same snapshot.
+
+Round 16 extends the walk past the ledger: load the planted
+product images through the image intake port and run the
+listing-quality diagnosis — so the image facts, the vision
+judgement artefacts, the vision call records and the listing
+finding set are graded byte-identical on both profiles too. The
+image bytes themselves live in each profile's own object store;
+the snapshot grades the record of them, which is content.
 """
 
 from __future__ import annotations
@@ -30,6 +38,8 @@ def run_core_walk(service: CommerceService):
     """Run the core walk over ``service``'s store; return the board."""
     service.generate_dataset()
     service.ledger.compute()
+    service.generate_product_images()
+    service.diagnose_listing_quality()
     service.diagnose_stockout()
     service.diagnose_ad_decay()
     service.diagnose_expenses()

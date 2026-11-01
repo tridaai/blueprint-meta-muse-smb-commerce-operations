@@ -120,7 +120,7 @@ def main() -> int:
             board = run_core_walk(service)
             snap_pg = snapshot(service, board)
             check("core walk completes on Postgres",
-                  service.store.count_facts() == 3954
+                  service.store.count_facts() == 3959
                   and len(service.store.list_artefacts()) >= 17,
                   f"{service.store.count_facts()} facts, "
                   f"{len(service.store.list_artefacts())} artefacts")

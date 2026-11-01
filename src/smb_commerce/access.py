@@ -139,6 +139,8 @@ _ARTEFACT_READ_PERMISSIONS: dict[str, str] = {
     "diagnosis_expense_anomaly": "diagnosis:read",
     "diagnosis_refund_anomaly": "diagnosis:read",
     "diagnosis_email_flow_audit": "diagnosis:read",
+    "diagnosis_listing_quality": "diagnosis:read",
+    "image_vision_judgement": "diagnosis:read",
     "diagnosis_refusal": "diagnosis:read",
     "growth_plan": "plan:read",
     "plan_refusal": "plan:read",

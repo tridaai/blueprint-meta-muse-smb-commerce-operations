@@ -19,6 +19,11 @@ Round 14 adds subscriptions and digests through the same
 boundary: the writes refuse loudly, and a digest read is decided
 by the digest's content — the caller must hold every permission
 the digest's included sections required (see ``digests.py``).
+
+Round 16 adds product images and the listing-quality diagnosis
+through the same boundary: image intake is a write, the listing
+diagnosis a run, and both artefact kinds (the diagnosis and its
+vision judgements) read as diagnoses under the pack.
 """
 
 from __future__ import annotations
@@ -43,8 +48,10 @@ from .diagnosis import DiagnosisService
 from .digests import DIGEST_KIND, DigestService, digest_visible
 from .drafting import DraftingService
 from .guardian import GuardianService
+from .images import ProductImageIntake
 from .ingest import IngestPort, IngestReport
 from .ledger import LedgerService
+from .listing import ListingQualityService
 from .modelport import GovernedModelPort, build_model_port, profile_report
 from .objectstore import ObjectStore, build_object_store
 from .plan import PlanService
@@ -82,6 +89,9 @@ class CommerceService:
         self.board = BoardService(self.store, self.guardian, self.approvals)
         self.digests = DigestService(self.store, self.board)
         self.objects: ObjectStore = build_object_store(self.settings)
+        self.images = ProductImageIntake(self.store, self.ingest, self.objects)
+        self.listing = ListingQualityService(
+            self.store, self.model, self.objects)
 
     # -- callers -----------------------------------------------------------
 
@@ -238,6 +248,34 @@ class CommerceService:
     def audit_email_flows(self, caller: Caller | None = None):
         require(self._caller(caller), "diagnose:run")
         return self.diagnosis.audit_email_flows()
+
+    # -- product images and listing quality (Round 16) -------------------
+    def generate_product_images(self, caller: Caller | None = None
+                                ) -> IngestReport:
+        """Load the planted listing images through the image
+        intake port. Idempotent like the dataset load: a second
+        load reports duplicates at the port and stores nothing
+        twice."""
+        require(self._caller(caller), "ingest:write")
+        report = generator.generate_images(self.images)
+        log.info("product images generated: %d accepted, %d duplicates",
+                 report.accepted, report.duplicates)
+        return report
+
+    def ingest_product_image(self, *, sku: str, filename: str,
+                             data: bytes, declared_class: str,
+                             source_system: str | None,
+                             as_of: str | None,
+                             caller: Caller | None = None):
+        require(self._caller(caller), "ingest:write")
+        return self.images.ingest_image(
+            sku=sku, filename=filename, data=data,
+            declared_class=declared_class,
+            source_system=source_system, as_of=as_of)
+
+    def diagnose_listing_quality(self, caller: Caller | None = None):
+        require(self._caller(caller), "diagnose:run")
+        return self.listing.diagnose()
 
     # -- plan --------------------------------------------------------------
     def assemble_plan(self, caller: Caller | None = None):

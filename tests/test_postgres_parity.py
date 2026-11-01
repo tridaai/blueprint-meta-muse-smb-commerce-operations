@@ -124,6 +124,7 @@ def test_core_walk_parity_gap_zero(pg_service, tmp_path):
     snap_sqlite = snapshot(sqlite_service, board_sqlite)
 
     # The snapshot must be the whole record, not a stub of it.
-    assert pg_service.store.count_facts() == 3954
+    # 3,954 dataset facts + the walk's 5 product-image facts.
+    assert pg_service.store.count_facts() == 3959
     assert len(pg_service.store.list_artefacts()) >= 17
     assert snap_pg == snap_sqlite
