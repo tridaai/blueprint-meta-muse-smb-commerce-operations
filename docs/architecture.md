@@ -113,12 +113,51 @@ Every surface — API, CLI, demo, graph — talks to one
   with reasons.
 - **Model port** (`modelport.py`): profiles behind one interface, a
   governed wrapper that records every call before returning the
-  reply. The price table is data, so reconciliation re-performs costs
+  reply. The prices are a versioned rate card (`2026.11.1`) held as
+  data — input, cached input and output per profile and tier, as
+  published for Muse Spark — so reconciliation re-performs costs
   row for row. The Meta adapter speaks the OpenAI chat-completions
   shape to a configurable base URL through a single transport
   callable — tests inject a local double, production uses httpx.
   Because the port is OpenAI-shaped, a hosted Spark Open endpoint can
   be added later as another profile with no caller changes.
+  Round 12 adds the verification path: `profile_report` resolves
+  the configured profile and reports its state without calling
+  anything (for `meta-muse`: the model id and its source — the
+  environment, or the built-in default `muse-spark`, configurable
+  and unverified — the base URL, the tier, key presence, and
+  fail-closed proved by attempting the construction), and
+  `probe_meta_muse` exercises the profile end to end against a
+  caller-supplied transport. Nothing in the codebase makes a live
+  call: there is no key in hand, and every report says so.
+- **Context** (`context.py`, Round 12): the context discipline at
+  the governed port, the one choke point every call passes
+  through. A versioned policy states the budget for Muse Spark's
+  1M-token window (window minus a stated output reserve), a
+  whitespace-word token estimator (the same one the offline
+  profile prices by — deterministic, and stated as an estimate),
+  and the compaction rule. Assembly pins the system prompt and a
+  request's sheet lines — the figure sheet or screen sheet, which
+  carry the figures and the contract — and treats the rest as
+  narrative: over budget, narrative lines drop oldest first
+  behind a single marker line, the minimum the budget forces;
+  pinned material alone over budget fails closed and the call
+  never happens. Every governed call records its assembly as an
+  insert-only `context_assembly` artefact whose arithmetic
+  `verify_context_payload` re-performs. Uncompacted calls keep
+  their pre-Round-12 call ids exactly; today's real contexts are
+  a few hundred words, so the machinery is graded with oversized
+  fixtures, in tests and in the eval gate.
+- **Cost analytics** (`costs.py`, Round 12): the ledger read back
+  in code — totals and breakdowns by profile, tier, model and
+  run, each breakdown summing exactly to the total, plus a
+  reconciliation that re-performs every recorded cost from the
+  rate card across all runs. Call records carry no timestamp, so
+  runs are the finest grain on the record; the summary states
+  that rather than inventing a by-day view. Surfaced as
+  `GET /costs`, `GET /model-profile`, `GET /contexts`, the CLI
+  `costs` / `model-profile` / `contexts` commands, and the demo's
+  closing beat.
 - **Object store port** (`objectstore.py`): filesystem by default,
   S3-compatible adapter when `SMB_S3_ENDPOINT` is set; the adapter
   fails closed on incomplete configuration. Round 1 wires the port;
