@@ -250,6 +250,22 @@ Zero-tolerance counters:
                                    accepted at the service layer
                                    or the API layer, or whose cost
                                    read showed a real total
+  - digest_figure_mismatches ..... a generated digest that the
+                                   verifier reports problems on —
+                                   a figure that does not
+                                   re-resolve, a section that does
+                                   not recompose, a stale pin
+  - digest_role_leaks ............ a digest carrying a section
+                                   its role may not read, or a
+                                   caller reading a digest whose
+                                   included sections require a
+                                   permission they do not hold
+  - duplicate_digests ............ generation landing anything
+                                   twice — a second run over an
+                                   unmoved record creating a
+                                   digest, or the run's digest
+                                   count differing from the
+                                   subscriptions it serves
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -287,6 +303,11 @@ from smb_commerce.context import (
 )
 from smb_commerce.costs import CostAnalytics
 from smb_commerce.diagnosis import DIAGNOSIS_PACK
+from smb_commerce.digests import (
+    DIGEST_KIND,
+    SECTION_PERMISSIONS,
+    sections_for_role,
+)
 from smb_commerce.drafting import DraftingService, DraftRefused
 from smb_commerce.ingest import IngestPort
 from smb_commerce.modelport import (
@@ -341,6 +362,8 @@ def main() -> int:
         "unrecorded_compactions", "cost_reconcile_failures",
         "existence_leaks", "role_escalations",
         "unroled_actions_accepted",
+        "digest_figure_mismatches", "digest_role_leaks",
+        "duplicate_digests",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -1640,6 +1663,46 @@ def main() -> int:
             counters["unroled_actions_accepted"] += 1
         if gate_client.get("/costs").json()["total"]["calls"] != 0:
             counters["unroled_actions_accepted"] += 1
+
+        # Digests (Round 14): over the access fixture's record —
+        # subscriptions for three roles, both cadences generated,
+        # every digest re-performing clean, no digest carrying a
+        # section its role may not read, no caller reading a
+        # digest whose sections they may not read, and a second
+        # generation run landing nothing twice.
+        access_svc.subscribe_digest("Maya Chen", "owner", "daily")
+        access_svc.subscribe_digest(
+            "Bea Bookkeeper", "bookkeeper", "daily")
+        access_svc.subscribe_digest("Vic Viewer", "viewer", "weekly")
+        access_svc.generate_digests("daily")
+        access_svc.generate_digests("weekly")
+        gate_digests = access_svc.store.list_artefacts(DIGEST_KIND)
+        if len(gate_digests) != 3:
+            counters["duplicate_digests"] += 1
+        section_permission = dict(SECTION_PERMISSIONS)
+        for digest in gate_digests:
+            counters["digest_figure_mismatches"] += len(
+                access_svc.digests.verify(digest))
+            payload = digest.payload
+            for name in section_permission:
+                if name in payload and name not in sections_for_role(
+                        payload["role"]):
+                    counters["digest_role_leaks"] += 1
+            for caller in (gate_owner, gate_operator, gate_bookkeeper,
+                           gate_viewer, ANONYMOUS):
+                may_read = caller.identified and all(
+                    caller.allows(section_permission[name])
+                    for name in section_permission
+                    if name in payload)
+                if (access_svc.read_digest(
+                        digest.artefact_id, caller)
+                        is not None) != may_read:
+                    counters["digest_role_leaks"] += 1
+        access_svc.generate_digests("daily")
+        access_svc.generate_digests("weekly")
+        if len(access_svc.store.list_artefacts(
+                DIGEST_KIND)) != len(gate_digests):
+            counters["duplicate_digests"] += 1
 
         # Cost analytics (Round 12): the summary over the gate's
         # own ledger must equal a hand sum over the recorded

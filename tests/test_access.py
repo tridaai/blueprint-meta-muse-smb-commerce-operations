@@ -71,6 +71,13 @@ EXPECTED = {
     "draft:run": {"owner", "operator"},
     "screen:run": {"owner", "operator"},
     "approvals:act": {"owner"},
+    # Round 14: the digest permissions. digests:read is the kind
+    # gate every staff role holds — a digest's content gate (the
+    # permissions its sections required) does the real work.
+    "digests:read": {"owner", "operator", "bookkeeper", "viewer"},
+    "digests:generate": {"owner", "operator"},
+    "subscriptions:read": {"owner", "operator"},
+    "subscriptions:write": {"owner", "operator"},
 }
 
 
