@@ -259,8 +259,9 @@ def test_quarantine_reads_on_the_service(service):
     listed = service.quarantines()
     assert [q.artefact_id for q in listed] == [report.quarantine.artefact_id]
     assert service.verify_quarantine(report.quarantine) == []
-    # The dataset itself is untouched by the refused batch.
-    assert service.store.count_facts() == 3954
+    # The record itself is untouched by the refused batch:
+    # the dataset's 3,954 facts plus the walk's 5 image facts.
+    assert service.store.count_facts() == 3959
 
 
 def test_connector_reads_on_the_api(tmp_path, monkeypatch):
