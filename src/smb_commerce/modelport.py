@@ -46,6 +46,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable
@@ -293,6 +294,43 @@ def _screen_sheet(prompt: str) -> dict | None:
     return sheet if isinstance(sheet, dict) else None
 
 
+def _squash(text: str) -> str:
+    """Lowercase, with every run of non-alphanumeric characters
+    collapsed to a single space."""
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _despace(text: str) -> str:
+    """Lowercase, letters and digits only — separators removed."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def phrase_in_texts(phrase: str, texts: list[str]) -> bool:
+    """Whether a stated phrase appears in a set of texts, judged
+    the way a reader receives it (Round 15).
+
+    Phrase packs are matched three ways: literally, in any one
+    text (the original rule); against the texts joined and
+    squashed, so a phrase split at a word boundary across two
+    texts — a subject ending "act", the body starting "now" —
+    still matches; and against the joined text despaced, so
+    separator tricks inside a word ("guaran-teed",
+    "g.u.a.r.a.n.t.e.e.d", "guaran" / "teed" across steps) do
+    not hide it. What this does not judge is letter substitution
+    — leetspeak or look-alike letters change the letters
+    themselves, and no separator rule sees them; that limit is
+    stated in docs/red-team.md.
+    """
+    needle = phrase.lower()
+    if any(needle in text.lower() for text in texts):
+        return True
+    joined = " ".join(texts)
+    if _squash(phrase) in _squash(joined):
+        return True
+    despaced = _despace(phrase)
+    return bool(despaced) and despaced in _despace(joined)
+
+
 def compose_screen_reply(prompt: str) -> str | None:
     """Compose a screening-contract reply deterministically — the
     offline profile's half of the guardian contract (Round 7).
@@ -307,13 +345,12 @@ def compose_screen_reply(prompt: str) -> str | None:
     sheet = _screen_sheet(prompt)
     if sheet is None:
         return None
-    texts = [str(text).lower() for text in sheet.get("texts", [])]
+    texts = [str(text) for text in sheet.get("texts", [])]
     rules = []
     for rule in sheet.get("judgement_rules", []):
         blocked = any(
-            phrase.lower() in text
+            phrase_in_texts(phrase, texts)
             for phrase in rule.get("phrases", [])
-            for text in texts
         )
         rules.append({
             "rule_id": rule["rule_id"],

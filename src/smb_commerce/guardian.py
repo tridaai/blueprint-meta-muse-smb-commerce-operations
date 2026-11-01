@@ -23,9 +23,16 @@ The split of labour is the Sentinel pattern, as a stated contract:
   so the guardian is a second net and not a rerun; the pack's
   prohibited content classes (guaranteed-results language,
   competitor disparagement — a pack-named competitor and a
-  disparagement phrase in the same sentence — and regulated
+  disparagement phrase in the same text — and regulated
   advice claims); and a source artefact that has been superseded
-  or refused since the draft was made.
+  or refused since the draft was made. Since Round 15 the phrase
+  classes are matched the way a reader receives them:
+  separator-insensitively and across a draft's texts
+  (``phrase_in_texts`` in the model port, shared with the
+  offline screening composer), word-form percentages are read
+  as compounds ("thirty-five percent" is thirty-five), and the
+  "half price" collocation is judged as the fifty-percent
+  promise it is even though it carries no marker word.
 - **The judgement calls go through the model port** as a separate
   screening call: tone and pressure tactics, and perk claims that
   mislead by omission. The call follows the screening contract —
@@ -80,7 +87,7 @@ from .drafting import (
     figure_tokens,
     resolve_field,
 )
-from .modelport import GovernedModelPort, call_cost
+from .modelport import GovernedModelPort, call_cost, phrase_in_texts
 from .models import Artefact
 from .store import SqlStore, canonical_json
 
@@ -89,7 +96,7 @@ VERDICT_KIND = "guardian_verdict"
 # -- the policy pack ------------------------------------------------------
 
 GUARDIAN_PACK = {
-    "version": "2026.10.1",
+    "version": "2026.11.1",
     # The largest discount, in percent, the business has
     # authorised any draft to promise. A promise beyond it is a
     # hard line, whatever words carry it.
@@ -101,7 +108,8 @@ GUARDIAN_PACK = {
         "markdown", "clearance",
     ],
     # Word-form discount promises: the word, with "off" in the
-    # same sentence, promises this percent.
+    # same sentence, promises this percent — or, for "half", in
+    # the "half price" collocation.
     "word_discounts": {"half": "50", "quarter": "25"},
     # The competitor names the disparagement rule judges against.
     "competitors": ["BrightNest Living", "Casa & Co", "Nestora"],
@@ -140,7 +148,20 @@ GUARDIAN_PACK = {
     },
 }
 
-GUARDIAN_PACKS = {GUARDIAN_PACK["version"]: GUARDIAN_PACK}
+# Pack 2026.11.1 (Round 15) carries the same stated lists, cap
+# and markers as 2026.10.1; what changed is the judgement code —
+# separator-insensitive phrase matching across a draft's texts,
+# compound word percents, the "half price" collocation, and
+# word-discount pairing tightened to the pack's stated rule.
+# The version bumped because the judgement changed, and the
+# prior pack stays resolvable so verdicts stamped under it
+# still find their pack in ``verify``.
+_PRIOR_GUARDIAN_PACK = {**GUARDIAN_PACK, "version": "2026.10.1"}
+
+GUARDIAN_PACKS = {
+    _PRIOR_GUARDIAN_PACK["version"]: _PRIOR_GUARDIAN_PACK,
+    GUARDIAN_PACK["version"]: GUARDIAN_PACK,
+}
 
 CODE_RULE_IDS = (
     "discount_beyond_cap",
@@ -193,6 +214,24 @@ _WORD_PERCENT = re.compile(
     + r")\s+percent\b",
     re.IGNORECASE,
 )
+# Compound word percents — "thirty-five percent", "twenty nine
+# percent" (Round 15: the single-word pattern read only the unit
+# word, so a thirty-five percent promise was judged as five).
+_TENS_WORDS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_UNIT_WORDS = {
+    word: value for word, value in _NUMBER_WORDS.items()
+    if 1 <= value <= 9
+}
+_WORD_PERCENT_COMPOUND = re.compile(
+    r"\b(" + "|".join(sorted(_TENS_WORDS, key=len, reverse=True))
+    + r")[-\s]("
+    + "|".join(sorted(_UNIT_WORDS, key=len, reverse=True))
+    + r")\s+percent\b",
+    re.IGNORECASE,
+)
 
 
 def draft_content_hash(draft: Artefact) -> str:
@@ -216,11 +255,24 @@ def _sentences(texts: list[str]) -> list[str]:
 
 
 def _percent_values(sentence: str) -> list[Decimal]:
-    """Every percentage a sentence states, in digits or words."""
+    """Every percentage a sentence states, in digits or words —
+    single number words and compound ones ("thirty-five")."""
     values = []
     for match in _DIGIT_PERCENT.finditer(sentence):
         values.append(Decimal(match.group(1).replace(",", "")))
+    compound_spans = []
+    for match in _WORD_PERCENT_COMPOUND.finditer(sentence):
+        values.append(Decimal(
+            _TENS_WORDS[match.group(1).lower()]
+            + _UNIT_WORDS[match.group(2).lower()]
+        ))
+        compound_spans.append(match.span())
     for match in _WORD_PERCENT.finditer(sentence):
+        if any(
+            start < match.end() and match.start() < end
+            for start, end in compound_spans
+        ):
+            continue
         values.append(Decimal(_NUMBER_WORDS[match.group(1).lower()]))
     return values
 
@@ -289,7 +341,6 @@ class GuardianService:
         rule is evaluated and reported, blocked or not."""
         payload = draft.payload
         texts = _prose_texts(payload.get("draft_kind"), payload.get("content", {}))
-        lowered = [text.lower() for text in texts]
         sentences = _sentences(texts)
         claims = payload.get("claims", [])
         rules: list[dict] = []
@@ -302,7 +353,12 @@ class GuardianService:
                 "detail": detail,
             }
 
-        # Discount promises beyond the authorised cap.
+        # Discount promises beyond the authorised cap. A
+        # sentence is judged when it carries one of the pack's
+        # marker words — or the "half price" collocation, which
+        # promises fifty percent without any marker word (Round
+        # 15: "everything is half price" passed the screen
+        # because no marker appeared).
         cap = Decimal(pack["max_discount_percent"])
         markers = pack["discount_markers"]
         discount_detail: list[str] = []
@@ -311,7 +367,7 @@ class GuardianService:
             if not any(
                 re.search(rf"\b{re.escape(marker)}\b", low)
                 for marker in markers
-            ):
+            ) and not re.search(r"\bhalf[-\s]price\b", low):
                 continue
             for value in _percent_values(sentence):
                 if value > cap:
@@ -319,11 +375,25 @@ class GuardianService:
                         f"{value}% over cap {cap}%: {sentence[:80]}"
                     )
             for word, percent in pack["word_discounts"].items():
-                if re.search(rf"\b{word}\b", low) and Decimal(
-                    percent
-                ) > cap:
+                if not re.search(rf"\b{word}\b", low):
+                    continue
+                if Decimal(percent) <= cap:
+                    continue
+                # The pack's stated pairing: the word promises
+                # its percent with "off" in the same sentence —
+                # or, for "half", as "half price". A bare "half"
+                # elsewhere in a marked sentence ("half of the
+                # catalogue is new; members save twenty-five
+                # percent") promises nothing (Round 15: the
+                # unpaired reading blocked that honest sentence
+                # as a fifty-percent promise).
+                paired = re.search(r"\boff\b", low) is not None or (
+                    word == "half"
+                    and re.search(r"\bhalf[-\s]price\b", low)
+                )
+                if paired:
                     discount_detail.append(
-                        f"{word} off = {percent}% over cap {cap}%:"
+                        f"{word} = {percent}% over cap {cap}%:"
                         f" {sentence[:80]}"
                     )
         rules.append(entry("discount_beyond_cap", discount_detail))
@@ -376,23 +446,36 @@ class GuardianService:
         rules.append(entry("figure_not_in_claims", figure_detail))
 
         # Prohibited content classes, from the pack's lists.
+        # Phrases are matched the way a reader receives them —
+        # separator-insensitively, across the draft's texts
+        # (``phrase_in_texts``): a phrase split across two email
+        # steps, or hyphenated inside a word, is the same promise
+        # (Round 15). Disparagement is judged per text rather
+        # than per sentence: naming the competitor in one
+        # sentence and disparaging them in the next is the same
+        # disparagement the reader receives.
         for class_name, phrases in pack["prohibited_classes"].items():
             detail: list[str] = []
             if class_name == "competitor_disparagement":
-                for sentence in sentences:
-                    low = sentence.lower()
+                for text in texts:
+                    low = text.lower()
                     named = [
                         name for name in pack["competitors"]
                         if name.lower() in low
                     ]
-                    hit = [p for p in phrases if p in low]
-                    if named and hit:
+                    if not named:
+                        continue
+                    hit = [
+                        p for p in phrases
+                        if phrase_in_texts(p, [text])
+                    ]
+                    if hit:
                         detail.append(
-                            f"{named[0]} + '{hit[0]}': {sentence[:80]}"
+                            f"{named[0]} + '{hit[0]}': {text[:80]}"
                         )
             else:
                 for phrase in phrases:
-                    if any(phrase in text for text in lowered):
+                    if phrase_in_texts(phrase, texts):
                         detail.append(f"phrase '{phrase}'")
             rules.append(entry(_CLASS_RULE_IDS[class_name], detail))
 

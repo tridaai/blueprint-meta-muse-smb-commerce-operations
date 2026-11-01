@@ -7,12 +7,42 @@ validated by kind at the ingest port; unknown kinds are refused.
 
 from __future__ import annotations
 
-from decimal import Decimal
-from typing import Any
+from decimal import Decimal, InvalidOperation
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 FACT_KINDS = ("order", "refund", "inventory", "ad_daily", "email_flow", "expense")
+
+
+def _finite_money(value: str) -> str:
+    """A money string must be a finite Decimal the ledger can
+    carry. The port refuses anything else as ``invalid_payload``:
+    before Round 15 a fact carrying ``"not-a-number"`` or
+    ``"NaN"`` as an amount was accepted at the port and then
+    crashed the ledger and the diagnosis packs (or, for an
+    order, silently poisoned the computed revenue with NaN) —
+    one planted fact disabled every later computation over the
+    record. A finite amount too large to quantize to cents
+    (``"1e30"``) crashed the same arithmetic, so the amount
+    must quantize to cents as well. The string itself is
+    returned unchanged; payloads round-trip byte-identically."""
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        raise ValueError(f"not a decimal amount: {value!r}") from None
+    if not parsed.is_finite():
+        raise ValueError(f"not a finite amount: {value!r}")
+    try:
+        parsed.quantize(Decimal("0.01"))
+    except InvalidOperation:
+        raise ValueError(
+            f"amount too large to carry in cents: {value!r}") from None
+    return value
+
+
+#: A money amount as a string that must parse as a finite Decimal.
+MoneyStr = Annotated[str, AfterValidator(_finite_money)]
 
 
 class OrderPayload(BaseModel):
@@ -20,15 +50,15 @@ class OrderPayload(BaseModel):
     sku: str
     date: str  # ISO date the order was placed
     qty: int = Field(gt=0)
-    unit_price: str  # Decimal as string
-    amount: str  # Decimal as string, qty * unit_price
+    unit_price: MoneyStr  # Decimal as string
+    amount: MoneyStr  # Decimal as string, qty * unit_price
 
 
 class RefundPayload(BaseModel):
     sku: str
     week_start: str  # ISO date, Monday of the refund week
     qty: int = Field(ge=0)
-    amount: str
+    amount: MoneyStr
 
 
 class InventoryPayload(BaseModel):
@@ -40,8 +70,8 @@ class InventoryPayload(BaseModel):
 class AdDailyPayload(BaseModel):
     ad_set: str
     date: str
-    spend: str  # Decimal as string
-    attributed_revenue: str  # Decimal as string
+    spend: MoneyStr  # Decimal as string
+    attributed_revenue: MoneyStr  # Decimal as string
 
 
 class EmailFlowPayload(BaseModel):
@@ -60,7 +90,7 @@ class ExpensePayload(BaseModel):
     vendor: str
     date: str
     category: str
-    amount: str  # Decimal as string
+    amount: MoneyStr  # Decimal as string
 
 
 PAYLOAD_MODELS: dict[str, type[BaseModel]] = {

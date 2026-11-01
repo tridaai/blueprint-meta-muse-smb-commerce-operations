@@ -320,6 +320,19 @@ class CommerceService:
                 [f"actor_role_may_not_approve:{caller.role or 'none'}"],
             )
             raise ApprovalRefused(refusal)
+        if (caller.identified and caller != INTERNAL_CALLER
+                and approver != caller.actor):
+            # The act must name the human who acted (Round 15):
+            # a presented caller may not record an approval in
+            # someone else's name. In-process flows act as the
+            # internal identity, which names the human in the
+            # act itself — the binding applies to presented
+            # (surface) callers, whose identity the act restates.
+            refusal = self.approvals.record_refusal(
+                "approve", draft_id, caller.actor,
+                ["approver_is_not_the_calling_actor"],
+            )
+            raise ApprovalRefused(refusal)
         return self.approvals.approve(draft_id, approver)
 
     def reject_draft(self, draft_id, rejecter, reason_code, note="",
@@ -330,6 +343,13 @@ class CommerceService:
             refusal = self.approvals.record_refusal(
                 "reject", draft_id, actor,
                 [f"actor_role_may_not_reject:{caller.role or 'none'}"],
+            )
+            raise ApprovalRefused(refusal)
+        if (caller.identified and caller != INTERNAL_CALLER
+                and rejecter != caller.actor):
+            refusal = self.approvals.record_refusal(
+                "reject", draft_id, caller.actor,
+                ["rejecter_is_not_the_calling_actor"],
             )
             raise ApprovalRefused(refusal)
         return self.approvals.reject(draft_id, rejecter, reason_code, note)
