@@ -68,6 +68,24 @@ Generating digests and writing subscriptions are actions, gated
 like the pipeline runs (owner + operator); reading the
 subscription record is owner + operator — it names the staff.
 
+Review packs (Round 17)
+-----------------------
+The pack gains three permissions. ``packs:read`` is held by
+every staff role as the kind gate — the pack is assembled
+whole rather than per role, so, exactly as with a digest, the
+service additionally requires the caller to hold **every**
+permission the pack's included sections required (ledger,
+plan, diagnosis, approvals, costs): in practice the owner and
+the operator read a full pack, and a caller missing any
+section's permission gets the absent answer. An export is
+gated by its pack's content the same way, and a publication
+act or refusal reads only to a caller who may read its pack.
+Generating a pack (and exporting it) is an operation, owner +
+operator; publishing one is the named human act over the pack
+and is reserved to the owner, like ``approvals:act`` — the
+operator may assemble the month's pack but may not publish
+what their own pipeline produced.
+
 The internal caller
 -------------------
 In-process flows — the demo, the eval gate, the LangGraph loop,
@@ -125,6 +143,16 @@ ACCESS_PACK: dict[str, frozenset[str]] = {
     "digests:generate": frozenset({"owner", "operator"}),
     "subscriptions:read": frozenset({"owner", "operator"}),
     "subscriptions:write": frozenset({"owner", "operator"}),
+    # Review packs (Round 17). packs:read is the kind gate every
+    # staff role holds — a pack is assembled whole, so the
+    # service additionally requires the caller to hold every
+    # permission the pack's included sections required (see
+    # reviewpacks.py). Generation and export are operations
+    # (owner + operator); publication is the named human act
+    # over the pack, reserved to the owner like approvals:act.
+    "packs:read": frozenset(ROLES),
+    "packs:generate": frozenset({"owner", "operator"}),
+    "packs:publish": frozenset({"owner"}),
 }
 
 PERMISSIONS = tuple(ACCESS_PACK)
@@ -157,6 +185,10 @@ _ARTEFACT_READ_PERMISSIONS: dict[str, str] = {
     "context_assembly": "costs:read",
     "ops_digest": "digests:read",
     "digest_subscription": "subscriptions:read",
+    "review_pack": "packs:read",
+    "review_pack_export": "packs:read",
+    "review_pack_publication": "packs:read",
+    "review_pack_publication_refusal": "packs:read",
 }
 
 
