@@ -24,6 +24,14 @@ Round 16 adds product images and the listing-quality diagnosis
 through the same boundary: image intake is a write, the listing
 diagnosis a run, and both artefact kinds (the diagnosis and its
 vision judgements) read as diagnoses under the pack.
+
+Round 17 adds the monthly review pack through the same
+boundary: generation and export are operations, publication is
+the owner's named act (refused attempts recorded as publication
+refusals, like approval refusals), and pack, export, act and
+refusal reads are all decided by the pack's content — the
+caller must hold every permission the pack's included sections
+required, or the answer is the absent form.
 """
 
 from __future__ import annotations
@@ -55,6 +63,16 @@ from .listing import ListingQualityService
 from .modelport import GovernedModelPort, build_model_port, profile_report
 from .objectstore import ObjectStore, build_object_store
 from .plan import PlanService
+from .reviewpacks import (
+    EXPORT_KIND,
+    PACK_KIND,
+    PUBLICATION_KIND,
+    PUBLICATION_REFUSAL_KIND,
+    PackPublicationRefused,
+    ReviewPackService,
+    export_visible,
+    pack_visible,
+)
 from .store import SqlStore
 
 log = logging.getLogger("smb_commerce.service")
@@ -89,6 +107,8 @@ class CommerceService:
         self.board = BoardService(self.store, self.guardian, self.approvals)
         self.digests = DigestService(self.store, self.board)
         self.objects: ObjectStore = build_object_store(self.settings)
+        self.review_packs = ReviewPackService(
+            self.store, self.board, self.objects)
         self.images = ProductImageIntake(self.store, self.ingest, self.objects)
         self.listing = ListingQualityService(
             self.store, self.model, self.objects)
@@ -119,6 +139,25 @@ class CommerceService:
             return None
         return self.store.get_fact(fact_id)
 
+    def _pack_family_visible(self, artefact,
+                             caller: Caller) -> bool | None:
+        """Content gating for the Round 17 kinds: a pack by its
+        sections, an export by its pack, a publication act or
+        refusal by its pack. None when the kind is not a pack
+        kind (the caller falls through to the kind gate)."""
+        if artefact.kind == PACK_KIND:
+            return pack_visible(artefact, caller)
+        if artefact.kind == EXPORT_KIND:
+            pack = self.store.get_artefact(
+                artefact.payload.get("pack_artefact_id", ""))
+            return export_visible(artefact, pack, caller)
+        if artefact.kind in (PUBLICATION_KIND,
+                             PUBLICATION_REFUSAL_KIND):
+            pack = self.store.get_artefact(
+                artefact.payload.get("pack_artefact_id", ""))
+            return pack is not None and pack_visible(pack, caller)
+        return None
+
     def read_artefact(self, artefact_id: str,
                       caller: Caller | None = None):
         artefact = self.store.get_artefact(artefact_id)
@@ -129,6 +168,9 @@ class CommerceService:
             # An addressed digest: content, not the kind gate,
             # decides (see digests.py).
             return artefact if digest_visible(artefact, caller) else None
+        gated = self._pack_family_visible(artefact, caller)
+        if gated is not None:
+            return artefact if gated else None
         permission = read_permission_for_kind(artefact.kind)
         if not visible(caller, permission):
             return None
@@ -143,6 +185,11 @@ class CommerceService:
         if kind == DIGEST_KIND:
             artefacts = [
                 a for a in artefacts if digest_visible(a, caller)]
+        elif kind in (PACK_KIND, EXPORT_KIND, PUBLICATION_KIND,
+                      PUBLICATION_REFUSAL_KIND):
+            artefacts = [
+                a for a in artefacts
+                if self._pack_family_visible(a, caller)]
         return artefacts
 
     def read_latest_artefact(self, kind: str,
@@ -156,6 +203,12 @@ class CommerceService:
                 a for a in self.store.list_artefacts(kind)
                 if digest_visible(a, caller)]
             return visible_digests[-1] if visible_digests else None
+        if kind in (PACK_KIND, EXPORT_KIND, PUBLICATION_KIND,
+                    PUBLICATION_REFUSAL_KIND):
+            visible_packs = [
+                a for a in self.store.list_artefacts(kind)
+                if self._pack_family_visible(a, caller)]
+            return visible_packs[-1] if visible_packs else None
         return self.store.latest_artefact(kind)
 
     def read_ledger(self, caller: Caller | None = None):
@@ -479,3 +532,123 @@ class CommerceService:
             and (cadence is None
                  or artefact.payload["cadence"] == cadence)
         ]
+
+    # -- monthly review pack (Round 17) --------------------------------
+    # Generation and export are operations and refuse loudly;
+    # reads answer with the absent form, decided by the pack's
+    # content. Publication is the owner's named act: the role
+    # gate and the caller-binding refuse before any pack lookup,
+    # and every refused attempt is recorded.
+
+    def generate_review_pack(self, month: str,
+                             caller: Caller | None = None):
+        require(self._caller(caller), "packs:generate")
+        return self.review_packs.generate(month)
+
+    def read_review_pack(self, artefact_id: str,
+                         caller: Caller | None = None):
+        artefact = self.store.get_artefact(artefact_id)
+        if artefact is None or artefact.kind != PACK_KIND:
+            return None
+        if not pack_visible(artefact, self._caller(caller)):
+            return None
+        return artefact
+
+    def read_review_packs(self, caller: Caller | None = None):
+        caller = self._caller(caller)
+        if not visible(caller, "packs:read"):
+            return []
+        return [
+            artefact
+            for artefact in self.store.list_artefacts(PACK_KIND)
+            if pack_visible(artefact, caller)
+        ]
+
+    def verify_review_pack(self, artefact_id: str,
+                           caller: Caller | None = None):
+        """The pack's re-performance problems, or None when the
+        pack is absent to this caller — the verify surface
+        hides existence the same way the read does."""
+        pack = self.read_review_pack(artefact_id, caller)
+        if pack is None:
+            return None
+        return self.review_packs.verify(pack)
+
+    def review_pack_status(self, artefact_id: str,
+                           caller: Caller | None = None):
+        pack = self.read_review_pack(artefact_id, caller)
+        if pack is None:
+            return None
+        return self.review_packs.publication_status(pack)
+
+    def export_review_pack(self, artefact_id: str,
+                           caller: Caller | None = None):
+        """Render and record the pack's export. Returns None
+        when the pack is absent to this caller — the export of
+        a pack the caller may not read does not happen, and
+        answers as absent."""
+        require(self._caller(caller), "packs:generate")
+        if self.read_review_pack(artefact_id, caller) is None:
+            return None
+        return self.review_packs.export(artefact_id)
+
+    def read_review_pack_export(self, artefact_id: str,
+                                caller: Caller | None = None):
+        artefact = self.store.get_artefact(artefact_id)
+        if artefact is None or artefact.kind != EXPORT_KIND:
+            return None
+        pack = self.store.get_artefact(
+            artefact.payload.get("pack_artefact_id", ""))
+        if not export_visible(artefact, pack, self._caller(caller)):
+            return None
+        return artefact
+
+    def read_review_pack_exports(self, pack_id: str | None = None,
+                                 caller: Caller | None = None):
+        caller = self._caller(caller)
+        if not visible(caller, "packs:read"):
+            return []
+        exports = []
+        for artefact in self.store.list_artefacts(EXPORT_KIND):
+            if (pack_id is not None
+                    and artefact.payload.get("pack_artefact_id")
+                    != pack_id):
+                continue
+            pack = self.store.get_artefact(
+                artefact.payload.get("pack_artefact_id", ""))
+            if export_visible(artefact, pack, caller):
+                exports.append(artefact)
+        return exports
+
+    def verify_review_pack_export(self, artefact_id: str,
+                                  caller: Caller | None = None):
+        export = self.read_review_pack_export(artefact_id, caller)
+        if export is None:
+            return None
+        return self.review_packs.verify_export(export)
+
+    def publish_review_pack(self, pack_id, publisher,
+                            caller: Caller | None = None):
+        caller = self._caller(caller)
+        if not caller.allows("packs:publish"):
+            # The gate fires before any pack lookup, so the
+            # refusal is identical for real and absent packs.
+            actor = caller.actor if caller.identified else publisher
+            refusal = self.review_packs.record_refusal(
+                "publish", pack_id, actor,
+                [f"actor_role_may_not_publish:{caller.role or 'none'}"],
+            )
+            raise PackPublicationRefused(refusal)
+        if (caller.identified and caller != INTERNAL_CALLER
+                and publisher != caller.actor):
+            # The act must name the human who acted (Round 15's
+            # rule for approvals, applied to publication).
+            refusal = self.review_packs.record_refusal(
+                "publish", pack_id, caller.actor,
+                ["publisher_is_not_the_calling_actor"],
+            )
+            raise PackPublicationRefused(refusal)
+        return self.review_packs.publish(pack_id, publisher)
+
+    def publication_refusals(self, caller: Caller | None = None):
+        return self.read_artefacts(PUBLICATION_REFUSAL_KIND, caller)

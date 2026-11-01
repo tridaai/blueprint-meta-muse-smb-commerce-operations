@@ -7,7 +7,10 @@ verdicts-verify, awaiting-approval, queue, approve, reject,
 approvals-verify, approval-history, approval-refusals, board,
 board-verify, connectors, quarantines, quarantine-verify,
 model-calls, model-profile, costs, contexts, subscriptions,
-subscribe, unsubscribe, digests, digest-generate, digest-verify.
+subscribe, unsubscribe, digests, digest-generate, digest-verify,
+review-packs, review-pack-generate, review-pack-verify,
+review-pack-export, review-pack-exports, review-pack-status,
+review-pack-publish, review-pack-export-verify.
 The
 diagnose commands cover all six diagnoses (stockout, ad decay,
 expense anomalies, refund anomalies, the email-flow audit, and
@@ -46,6 +49,16 @@ member; `--actor` / `--role` remain the caller's own identity),
 `digest-generate` folds a cadence's digests into the record, and
 `digests` / `digest-verify` read them back under the same
 content gate the API applies. Nothing is sent anywhere.
+
+Round 17: the review-pack commands fold one stated month's
+pack (`review-pack-generate --month`), read packs back under
+the content gate (`review-packs`, `review-pack-verify`,
+`review-pack-status`), render and record the export
+(`review-pack-export --pack`, `review-pack-exports`,
+`review-pack-export-verify --export`), and record the owner's
+publication act (`review-pack-publish --pack`, the publisher
+defaulting to the caller's own actor). Publication is recorded
+in the record; nothing is distributed anywhere.
 """
 
 from __future__ import annotations
@@ -65,6 +78,7 @@ from .diagnosis import DiagnosisRefused
 from .drafting import DRAFT_KINDS, DraftRefused
 from .listing import ListingRefused
 from .plan import PlanRefused
+from .reviewpacks import PackPublicationRefused
 from .service import CommerceService
 
 
@@ -357,13 +371,20 @@ def main(argv: list[str] | None = None) -> int:
         "quarantine-verify", "model-calls", "model-profile",
         "costs", "contexts", "subscriptions", "subscribe",
         "unsubscribe", "digests", "digest-generate",
-        "digest-verify"])
+        "digest-verify", "review-packs", "review-pack-generate",
+        "review-pack-verify", "review-pack-export",
+        "review-pack-exports", "review-pack-status",
+        "review-pack-publish", "review-pack-export-verify"])
     parser.add_argument("--kind", default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--draft", default=None)
     parser.add_argument("--cadence", default=None)
     parser.add_argument("--period-end", default=None)
     parser.add_argument("--digest", default=None)
+    parser.add_argument("--month", default=None)
+    parser.add_argument("--pack", default=None)
+    parser.add_argument("--export", default=None)
+    parser.add_argument("--publisher", default=None)
     parser.add_argument("--subscriber", default=None)
     parser.add_argument("--subscriber-role", default=None)
     parser.add_argument("--approver", default=None)
@@ -890,6 +911,127 @@ def main(argv: list[str] | None = None) -> int:
                           "verified": not problems,
                           "problems": problems}))
         return 0 if not problems else 1
+    if args.command == "review-pack-generate":
+        if not args.month:
+            print("review-pack-generate requires --month")
+            return 2
+        try:
+            pack = service.generate_review_pack(args.month, caller)
+        except AccessRefused as refused:
+            print(f"REFUSED review-pack-generate:"
+                  f" {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
+        except ValueError as error:
+            print(f"REFUSED review-pack-generate: {error}")
+            return 1
+        status = service.review_packs.publication_status(pack)
+        print(f"{pack.artefact_id} month {pack.payload['month']}"
+              f" as of {pack.payload['as_of']}"
+              f" sections {', '.join(pack.payload['sections_included'])}"
+              f" — {status['status']}")
+        return 0
+    if args.command == "review-packs":
+        packs = service.read_review_packs(caller)
+        for pack in packs:
+            status = service.review_packs.publication_status(pack)
+            stale = " STALE" if status["stale"] else ""
+            print(f"{pack.artefact_id} month {pack.payload['month']}"
+                  f" as of {pack.payload['as_of']}"
+                  f" — {status['status']}{stale}")
+        print(f"{len(packs)} review packs")
+        return 0
+    if args.command == "review-pack-verify":
+        if not args.pack:
+            print("review-pack-verify requires --pack")
+            return 2
+        problems = service.verify_review_pack(args.pack, caller)
+        if problems is None:
+            print(json.dumps({"verified": False,
+                              "problems": ["no_review_pack"]}))
+            return 1
+        print(json.dumps({"artefact_id": args.pack,
+                          "verified": not problems,
+                          "problems": problems}))
+        return 0 if not problems else 1
+    if args.command == "review-pack-status":
+        if not args.pack:
+            print("review-pack-status requires --pack")
+            return 2
+        status = service.review_pack_status(args.pack, caller)
+        if status is None:
+            print(json.dumps({"status": "absent"}))
+            return 1
+        print(json.dumps(status))
+        return 0
+    if args.command == "review-pack-export":
+        if not args.pack:
+            print("review-pack-export requires --pack")
+            return 2
+        try:
+            export = service.export_review_pack(args.pack, caller)
+        except AccessRefused as refused:
+            print(f"REFUSED review-pack-export:"
+                  f" {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
+        if export is None:
+            print("no review pack to export")
+            return 1
+        p = export.payload
+        print(f"{export.artefact_id} for pack {p['pack_artefact_id']}"
+              f" month {p['month']} object {p['object_key']}"
+              f" body sha256 {p['body_checksum'][:16]}..."
+              f" {len(p['referenced_artefacts'])} referenced artefacts"
+              f" — {p['publication']['status']}")
+        return 0
+    if args.command == "review-pack-exports":
+        exports = service.read_review_pack_exports(args.pack, caller)
+        for export in exports:
+            p = export.payload
+            print(f"{export.artefact_id} pack {p['pack_artefact_id']}"
+                  f" month {p['month']}"
+                  f" — {p['publication']['status']}")
+        print(f"{len(exports)} review pack exports")
+        return 0
+    if args.command == "review-pack-export-verify":
+        if not args.export:
+            print("review-pack-export-verify requires --export")
+            return 2
+        problems = service.verify_review_pack_export(
+            args.export, caller)
+        if problems is None:
+            print(json.dumps({"verified": False,
+                              "problems": ["no_review_pack_export"]}))
+            return 1
+        print(json.dumps({"artefact_id": args.export,
+                          "verified": not problems,
+                          "problems": problems}))
+        return 0 if not problems else 1
+    if args.command == "review-pack-publish":
+        if not args.pack:
+            print("review-pack-publish requires --pack")
+            return 2
+        publisher = args.publisher or (
+            caller.actor if caller.identified
+            and caller != INTERNAL_CALLER else None)
+        if not publisher:
+            print("review-pack-publish requires --publisher"
+                  " (or a presented --actor to publish as)")
+            return 2
+        try:
+            act = service.publish_review_pack(
+                args.pack, publisher, caller)
+        except PackPublicationRefused as refused:
+            print(f"REFUSED review-pack-publish:"
+                  f" {refused.refusal.artefact_id}"
+                  f" {', '.join(refused.refusal.payload['problems'])}")
+            return 1
+        print(f"{act.artefact_id} pack {act.payload['pack_artefact_id']}"
+              f" month {act.payload['month']}"
+              f" published by {act.payload['publisher']}"
+              " — recorded in the record, distributed nowhere")
+        return 0
     return 2
 
 

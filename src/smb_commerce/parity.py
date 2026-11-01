@@ -30,6 +30,15 @@ and the listing finding set are graded byte-identical on both
 profiles too. The image bytes themselves live in each profile's
 own object store; the snapshot grades the record of them, which
 is content.
+
+Round 17 extends the walk past the digests: fold the review
+pack for the head ledger's month, export it, and publish it
+with a named act — so the pack, the export record (its body
+checksum and manifest are content, rendered deterministically
+from the pack) and the publication act are graded byte-identical
+on both profiles too. The export's bytes live in each profile's
+own object store, like the image bytes; the snapshot grades the
+record of them.
 """
 
 from __future__ import annotations
@@ -66,6 +75,9 @@ def run_core_walk(service: CommerceService):
     service.subscribe_digest("parity-operator", "operator", "weekly")
     service.generate_digests("daily")
     service.generate_digests("weekly")
+    pack = service.generate_review_pack(board.payload["as_of"][:7])
+    service.export_review_pack(pack.artefact_id)
+    service.publish_review_pack(pack.artefact_id, "parity-owner")
     return board
 
 

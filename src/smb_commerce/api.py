@@ -33,6 +33,18 @@ nothing), `/digests/generate` (fold the period's digests for the
 active subscriptions of one cadence), and the digest reads
 (`/digests`, `/digests/{id}`, `/digests/{id}/verify`), gated by
 the digest's own content exactly as the service gates them.
+
+Round 17 adds the review pack endpoints: `/review-packs/generate`
+(fold one stated month's pack), the pack reads (`/review-packs`,
+`/review-packs/{id}`, `/review-packs/{id}/verify`,
+`/review-packs/{id}/status`), `/review-packs/{id}/export`
+(render the export document and record it), `/review-packs/{id}/publish`
+(the owner's named act, refusals recorded and returned as 422
+with the refusal's problems, like an approval refusal), and the
+export reads (`/review-pack-exports/{id}`,
+`/review-pack-exports/{id}/verify`). Pack and export reads are
+gated by the pack's content exactly as the service gates them —
+a forbidden pack and a missing pack return the same 404.
 """
 
 from __future__ import annotations
@@ -47,6 +59,7 @@ from pydantic import BaseModel
 from .access import AccessRefused, Caller, resolve_caller
 from .approvals import APPROVAL_KIND, REJECTION_KIND, ApprovalRefused
 from .config import load_settings
+from .reviewpacks import PackPublicationRefused
 from .logging_config import configure_logging, new_request_id, request_id_var
 from .service import CommerceService
 
@@ -779,4 +792,135 @@ def verify_digest(digest_id: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="digest not found")
     problems = service.digests.verify(digest)
     return {"artefact_id": digest.artefact_id,
+            "verified": not problems, "problems": problems}
+
+
+class GenerateReviewPackRequest(BaseModel):
+    month: str
+
+
+class PublishReviewPackRequest(BaseModel):
+    publisher: str
+
+
+@app.post("/review-packs/generate")
+def generate_review_pack(body: GenerateReviewPackRequest,
+                         request: Request) -> dict:
+    """Fold one stated month's review pack from the record.
+    Generation writes the pack artefact; it publishes nothing
+    and sends nothing."""
+    service = get_service()
+    try:
+        pack = service.generate_review_pack(
+            body.month, caller=_caller(request))
+    except AccessRefused as refused:
+        raise _forbidden(refused)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    return pack.model_dump()
+
+
+@app.get("/review-packs")
+def list_review_packs(request: Request) -> dict:
+    """The review packs the caller's role may read — decided by
+    each pack's content, so a pack whose sections the caller
+    may not read is simply not in the list."""
+    service = get_service()
+    packs = service.read_review_packs(_caller(request))
+    return {"count": len(packs),
+            "review_packs": [p.model_dump() for p in packs]}
+
+
+@app.get("/review-packs/{pack_id}")
+def get_review_pack(pack_id: str, request: Request) -> dict:
+    service = get_service()
+    pack = service.read_review_pack(pack_id, _caller(request))
+    if pack is None:
+        raise HTTPException(status_code=404,
+                            detail="review pack not found")
+    return pack.model_dump()
+
+
+@app.get("/review-packs/{pack_id}/verify")
+def verify_review_pack(pack_id: str, request: Request) -> dict:
+    service = get_service()
+    problems = service.verify_review_pack(pack_id, _caller(request))
+    if problems is None:
+        raise HTTPException(status_code=404,
+                            detail="review pack not found")
+    return {"artefact_id": pack_id,
+            "verified": not problems, "problems": problems}
+
+
+@app.get("/review-packs/{pack_id}/status")
+def review_pack_status(pack_id: str, request: Request) -> dict:
+    """The pack's derived publication state: draft until a
+    verifying publication act exists; published from the act,
+    marked stale with the moved inputs named when its pins
+    moved."""
+    service = get_service()
+    status = service.review_pack_status(pack_id, _caller(request))
+    if status is None:
+        raise HTTPException(status_code=404,
+                            detail="review pack not found")
+    return status
+
+
+@app.post("/review-packs/{pack_id}/export")
+def export_review_pack(pack_id: str, request: Request) -> dict:
+    """Render the pack's export document — provenance appendix
+    and checksum manifest — store its bytes through the object
+    store, and record the export artefact."""
+    service = get_service()
+    try:
+        export = service.export_review_pack(
+            pack_id, caller=_caller(request))
+    except AccessRefused as refused:
+        raise _forbidden(refused)
+    if export is None:
+        raise HTTPException(status_code=404,
+                            detail="review pack not found")
+    return export.model_dump()
+
+
+@app.post("/review-packs/{pack_id}/publish")
+def publish_review_pack(pack_id: str,
+                        body: PublishReviewPackRequest,
+                        request: Request) -> dict:
+    """The owner's named publication act over one pack, bound
+    to its content hash. A refused attempt is recorded as a
+    publication refusal and returned with its problems."""
+    service = get_service()
+    try:
+        act = service.publish_review_pack(
+            pack_id, body.publisher, caller=_caller(request))
+    except PackPublicationRefused as refused:
+        raise HTTPException(status_code=422, detail={
+            "refusal_artefact_id": refused.refusal.artefact_id,
+            "problems": refused.refusal.payload["problems"],
+        })
+    return act.model_dump()
+
+
+@app.get("/review-pack-exports/{export_id}")
+def get_review_pack_export(export_id: str, request: Request) -> dict:
+    service = get_service()
+    export = service.read_review_pack_export(
+        export_id, _caller(request))
+    if export is None:
+        raise HTTPException(status_code=404,
+                            detail="review pack export not found")
+    return export.model_dump()
+
+
+@app.get("/review-pack-exports/{export_id}/verify")
+def verify_review_pack_export(export_id: str,
+                              request: Request) -> dict:
+    service = get_service()
+    problems = service.verify_review_pack_export(
+        export_id, _caller(request))
+    if problems is None:
+        raise HTTPException(status_code=404,
+                            detail="review pack export not found")
+    return {"artefact_id": export_id,
             "verified": not problems, "problems": problems}
