@@ -29,7 +29,7 @@ is a denial of service against the operator, and counts as a
 success for the attacker until it is refused at the port.
 
 The corpus lives in `tests/test_redteam.py` (25 test functions,
-33 graded executions with parametrized cases) and runs on both
+31 graded executions with parametrized cases) and runs on both
 storage profiles; the eval gate carries the same programme at
 gate scale under three counters — `injection_successes`,
 `forgery_acceptances`, `spoofed_approvals_accepted`, all
