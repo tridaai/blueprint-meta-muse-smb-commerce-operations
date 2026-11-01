@@ -115,6 +115,32 @@ service enforces it the same way for all of them.
   diagnose; adequate SKUs and steady ad sets are named nowhere in
   them, while no-data SKUs and unjudged ad sets are named as such,
   with reasons.
+- **Product images and listing quality** (`images.py`,
+  `listing.py`, Round 16): the catalogue's images enter through a
+  stated intake port in front of the ingest port — provenance
+  refused when absent, the format sniffed and the dimensions
+  measured in code (a stdlib measurer for PNG, JPEG and GIF; other
+  formats are refused as unreadable until a measurer exists), the
+  bytes stored through the object-store port under a
+  content-addressed key, and the measurement recorded as a
+  `product_image` fact. The listing pack (`2026.11.1`) judges each
+  SKU's latest image: deterministic findings (missing,
+  provenance-incomplete, hash mismatch against the stored bytes,
+  below the stated 800x800 minimums, filename format against
+  sniffed format) and one model judgement — what the image shows,
+  taken through the governed port's vision shape and recorded as
+  an insert-only `image_vision_judgement` artefact stamped with
+  profile, model, tier, pack version and call id, which a
+  `vision_mismatch` finding cites on its face. Two routes must
+  agree before the set may exist — route 2 re-measures the bytes
+  and, offline, re-derives the subject from them; a hosted profile
+  cannot be re-called by a verifier, so its stored judgements are
+  the record, the same stated limit as the other hosted paths —
+  and `verify` re-performs measurements, findings and judgement
+  bindings alike. Listing quality is a peer diagnosis, not a
+  sixth plan family: the plan pack's families carry the money
+  and unit exposures the plan ranks by, a listing finding
+  carries none, and the plan pack is not revised this round.
 - **Model port** (`modelport.py`): profiles behind one interface, a
   governed wrapper that records every call before returning the
   reply. The prices are a versioned rate card (`2026.11.1`) held as
@@ -134,6 +160,14 @@ service enforces it the same way for all of them.
   `probe_meta_muse` exercises the profile end to end against a
   caller-supplied transport. Nothing in the codebase makes a live
   call: there is no key in hand, and every report says so.
+  Round 16 adds `analyse_image` beside `complete` — the same
+  context assembly over the text alone (image bytes never enter
+  a text context), the same ledger and context records, the call
+  id keyed to the image's content hash. Offline, the judgement
+  composes from the subject class embedded in the fixture bytes;
+  `meta-muse` shapes the multimodal message (text plus the image
+  as a data URI) over the same transport — stub-tested, and no
+  live vision call has been made.
 - **Context** (`context.py`, Round 12): the context discipline at
   the governed port, the one choke point every call passes
   through. A versioned policy states the budget for Muse Spark's
