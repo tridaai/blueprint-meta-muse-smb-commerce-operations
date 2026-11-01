@@ -86,6 +86,14 @@ EXPECTED = {
     "packs:read": {"owner", "operator", "bookkeeper", "viewer"},
     "packs:generate": {"owner", "operator"},
     "packs:publish": {"owner"},
+    # Round 18: token records are credential metadata (owner
+    # alone, read and issue alike); webhook writes are the
+    # owner's, reads owner + operator — neither read carries a
+    # secret.
+    "tokens:read": {"owner"},
+    "tokens:issue": {"owner"},
+    "webhooks:read": {"owner", "operator"},
+    "webhooks:write": {"owner"},
 }
 
 

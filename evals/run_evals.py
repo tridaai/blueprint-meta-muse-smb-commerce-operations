@@ -334,6 +334,30 @@ Zero-tolerance counters:
                                    conferring published status, or
                                    a published pack shown stale
                                    without cause
+  - token_scope_escalations ...... an action accepted for a
+                                   token-authenticated caller
+                                   outside the token's scope set,
+                                   or an issuance accepted whose
+                                   scopes exceed its role
+  - revoked_token_actions ........ an action or a record read
+                                   accepted under a revoked or
+                                   expired token, or a forged
+                                   bearer string resolving to an
+                                   identified caller
+  - token_plaintext_leaks ........ an issued token's secret found
+                                   anywhere in the stored record
+                                   or in a token read projection
+  - webhook_payload_figure_leaks . a webhook delivery whose
+                                   payload carries a figure or a
+                                   key outside the stated payload
+                                   shape (event, delivery,
+                                   subscription, time, actor,
+                                   artefact ids)
+  - unsigned_deliveries_accepted . a delivery the local double
+                                   receiver accepted without a
+                                   verifying signature, or a
+                                   recorded delivery whose
+                                   signature does not re-perform
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -393,6 +417,7 @@ from smb_commerce.plan import PlanRefused
 from smb_commerce.reviewpacks import PackPublicationRefused
 from smb_commerce.service import CommerceService
 from smb_commerce.store import SqlStore, canonical_json
+from smb_commerce.webhooks import LocalReceiver
 
 
 def main() -> int:
@@ -440,6 +465,10 @@ def main() -> int:
         "unlabelled_vision_findings",
         "pack_figure_mismatches", "checksum_failures_accepted",
         "unapproved_publications",
+        "token_scope_escalations", "revoked_token_actions",
+        "token_plaintext_leaks",
+        "webhook_payload_figure_leaks",
+        "unsigned_deliveries_accepted",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -2104,6 +2133,103 @@ def main() -> int:
             problem for problem
             in service.review_packs.verify_export(published_export)
             if "checksum" in problem])
+
+        # Scoped tokens (Round 18): issuance refuses a scope set
+        # that would widen its role; a token caller is narrowed
+        # at every gate, and its refused out-of-scope action is
+        # recorded; a forged, expired or revoked bearer string
+        # resolves to the anonymous caller and acts as no one;
+        # the issued secrets are nowhere in the record or in a
+        # read projection.
+        try:
+            service.issue_token("Eval Viewer", "viewer", ["facts:read"])
+            counters["token_scope_escalations"] += 1
+        except ValueError:
+            pass
+        eval_token = service.issue_token(
+            "Eval Operator", "operator", ["facts:read", "costs:read"])
+        eval_secret = eval_token.bearer.split(".", 1)[1]
+        token_caller = service.authenticate_token(eval_token.bearer)
+        if not token_caller.identified:
+            counters["revoked_token_actions"] += 1
+        if service.read_latest_artefact(
+                "ledger", token_caller) is not None:
+            counters["token_scope_escalations"] += 1
+        try:
+            service.diagnose_stockout(token_caller)
+            counters["token_scope_escalations"] += 1
+        except AccessRefused:
+            pass
+        if not service.store.list_artefacts("api_token_refusal"):
+            counters["token_scope_escalations"] += 1
+        forged_caller = service.authenticate_token(
+            eval_token.token_id + "." + "0" * 64)
+        if forged_caller.identified:
+            counters["revoked_token_actions"] += 1
+        if service.read_facts(None, forged_caller):
+            counters["revoked_token_actions"] += 1
+        expired = service.issue_token(
+            "Eval Operator", "operator", ["facts:read"],
+            at="2026-01-01T00:00:00+00:00", ttl_seconds=60)
+        expired_secret = expired.bearer.split(".", 1)[1]
+        if service.authenticate_token(
+                expired.bearer,
+                at="2026-01-01T01:00:00+00:00").identified:
+            counters["revoked_token_actions"] += 1
+        service.revoke_token(eval_token.token_id)
+        revoked_caller = service.authenticate_token(eval_token.bearer)
+        if revoked_caller.identified:
+            counters["revoked_token_actions"] += 1
+        if service.read_facts(None, revoked_caller):
+            counters["revoked_token_actions"] += 1
+        record_text = "\n".join(
+            canonical_json(a.payload)
+            for a in service.store.list_artefacts())
+        if eval_secret in record_text or expired_secret in record_text:
+            counters["token_plaintext_leaks"] += 1
+        for projection in service.read_tokens():
+            if eval_secret in canonical_json(projection):
+                counters["token_plaintext_leaks"] += 1
+
+        # Webhooks (Round 18): a second month's pack publishes
+        # to a subscribed endpoint through a local double — the
+        # delivery is recorded once, its payload carries the
+        # stated keys and no ledger figure, its signature
+        # re-performs, and the double accepts nothing unsigned.
+        receiver = LocalReceiver("eval-webhook-secret")
+        service.webhooks.deliver = receiver
+        service.subscribe_webhook(
+            "https://hooks.example.invalid/evals",
+            ["review_pack_published"],
+            signing_secret="eval-webhook-secret")
+        pack_two = service.generate_review_pack("2026-02")
+        service.publish_review_pack(pack_two.artefact_id, "Eval Owner")
+        hook_deliveries = service.read_webhook_deliveries()
+        if len(hook_deliveries) != 1:
+            counters["unsigned_deliveries_accepted"] += 1
+        ledger = service.read_latest_artefact("ledger")
+        for delivery in hook_deliveries:
+            if set(delivery["body"]) != {
+                    "event", "delivery_id", "subscription_id",
+                    "occurred_at", "actor", "artefacts"}:
+                counters["webhook_payload_figure_leaks"] += 1
+            body_text = canonical_json(delivery["body"])
+            for figure in (ledger.payload["gross_revenue"],
+                           ledger.payload["net_revenue"],
+                           ledger.payload["gross_margin"]):
+                if figure in body_text:
+                    counters["webhook_payload_figure_leaks"] += 1
+            if not service.webhooks.verify_delivery(
+                    delivery["delivery_id"]):
+                counters["unsigned_deliveries_accepted"] += 1
+        if len(receiver.accepted) != len(hook_deliveries):
+            counters["unsigned_deliveries_accepted"] += 1
+        if receiver.accepted:
+            if receiver(
+                    "https://hooks.example.invalid/evals",
+                    receiver.accepted[0],
+                    {"X-SMB-Signature": "sha256=" + "0" * 64}) != 401:
+                counters["unsigned_deliveries_accepted"] += 1
 
         # Cost analytics (Round 12): the summary over the gate's
         # own ledger must equal a hand sum over the recorded

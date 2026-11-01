@@ -762,16 +762,18 @@ class CommerceService:
         return self.tokens.revoke(
             token_id, revoked_by=caller.actor)
 
-    def read_tokens(self, caller: Caller | None = None):
+    def read_tokens(self, caller: Caller | None = None,
+                    at: str | None = None):
         if not visible(self._caller(caller), "tokens:read"):
             return []
-        return self.tokens.tokens()
+        return self.tokens.tokens(at)
 
     def read_token(self, token_id: str,
-                   caller: Caller | None = None):
+                   caller: Caller | None = None,
+                   at: str | None = None):
         if not visible(self._caller(caller), "tokens:read"):
             return None
-        return self.tokens.token(token_id)
+        return self.tokens.token(token_id, at)
 
     # -- webhooks (Round 18) -------------------------------------------
     # Subscribing and unsubscribing are the owner's acts and

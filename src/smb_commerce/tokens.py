@@ -26,13 +26,19 @@ The secret's life
 The secret is 32 bytes from a CSPRNG, hex-encoded into the
 bearer string (``<token_id>.<secret>``), and shown exactly
 once — in the issuance result. What the record stores is a
-salted PBKDF2-HMAC-SHA256 of the secret (per-token 16-byte
-salt, stated rounds): the plaintext never persists, never
-appears in an artefact, a log line or a read. Reads of the
-token record are metadata projections — id, actor, role,
-scopes, issued/expiry, derived status — and are owner-gated
-by the pack (``tokens:read``). Verification recomputes the
-KDF over the presented secret and compares in constant time.
+salted PBKDF2-HMAC-SHA256 over the secret's SHA-256 digest
+(per-token 16-byte salt, stated rounds): the plaintext never
+persists, never appears in an artefact, a log line or a read.
+The pre-hash is not decoration — fed raw to the KDF, the
+secret is an HMAC key, and HMAC zero-pads short keys to the
+block size, so a secret extended with trailing zero bytes
+would verify as the same key; over the digest, any byte
+difference in the presented secret is a different input.
+Reads of the token record are metadata projections — id,
+actor, role, scopes, issued/expiry, derived status — and are
+owner-gated by the pack (``tokens:read``). Verification
+recomputes the KDF over the presented secret and compares in
+constant time.
 
 Expiry and revocation are derived, never edited: a token
 expires at its stated ``expires_at`` (issuance plus a TTL —
@@ -146,7 +152,8 @@ class TokenService:
             "issued_at": issued_at, "salt": salt.hex(),
         }).encode()).hexdigest()[:20]
         secret_hash = hashlib.pbkdf2_hmac(
-            "sha256", secret, salt, _PBKDF2_ROUNDS).hex()
+            "sha256", hashlib.sha256(secret).digest(), salt,
+            _PBKDF2_ROUNDS).hex()
         payload = {
             "token_id": token_id,
             "actor": actor,
@@ -279,7 +286,8 @@ class TokenService:
         except ValueError:
             return ANONYMOUS
         candidate = hashlib.pbkdf2_hmac(
-            "sha256", secret, salt, _PBKDF2_ROUNDS).hex()
+            "sha256", hashlib.sha256(secret).digest(), salt,
+            _PBKDF2_ROUNDS).hex()
         if not hmac.compare_digest(
                 candidate, artefact.payload["secret_hash"]):
             return ANONYMOUS
