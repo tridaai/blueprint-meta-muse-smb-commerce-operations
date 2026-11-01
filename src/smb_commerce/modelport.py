@@ -19,12 +19,26 @@ Profiles:
 Tier discipline (Law 6): the tier comes from configuration
 (``META_MUSE_TIER``, default ``standard``) and is stamped on every
 call record. Standard is the tier whose data Meta does not train on;
-Contributor is far cheaper and Meta may train on it — the price table
+Contributor is far cheaper and Meta may train on it — the rate card
 below carries both, so the trade-off is visible in the ledger itself.
 
-Prices are USD per 1M tokens (input, output), as published at
-dev.meta.ai for Muse Spark: standard 1.25 / 4.25, contributor
-0.10 / 0.20. The offline profile costs nothing by construction.
+Prices are the versioned rate card (``RATE_CARD``, version
+``2026.11.1``): USD per 1M tokens — input, cached input, output —
+as published at dev.meta.ai for Muse Spark: standard 1.25 / 0.15 /
+4.25, contributor 0.10 / 0.002 / 0.20. The offline profile costs
+nothing by construction. Recorded calls price their input and
+output tokens; no usage source in this codebase reports a cached
+split yet, so the cached rate is the card's stated price for the
+day one does — :func:`call_cost` already applies it to any cached
+portion a caller hands it.
+
+Round 12 adds the profile verification path: :func:`profile_report`
+resolves the configured profile and reports its state without
+calling anything, and :func:`probe_meta_muse` exercises the hosted
+profile end to end against a caller-supplied transport (the test
+suite's local double). Neither makes a live call: there is no Meta
+Model API key in hand, and the hosted profile's live leg stays
+honestly pending until one exists.
 """
 
 from __future__ import annotations
@@ -39,24 +53,65 @@ from typing import Callable
 from .models import ModelCallRecord
 from .store import SqlStore
 
-PRICE_TABLE: dict[str, dict[str, tuple[Decimal, Decimal]]] = {
+RATE_CARD_VERSION = "2026.11.1"
+
+# USD per 1M tokens, as published at dev.meta.ai for Muse Spark.
+# ``cached_input`` prices the cached portion of the input — a
+# subset of the input tokens, charged at the cached rate instead
+# of the full input rate.
+RATE_CARD: dict[str, dict[str, dict[str, Decimal]]] = {
     "meta-muse": {
-        "standard": (Decimal("1.25"), Decimal("4.25")),
-        "contributor": (Decimal("0.10"), Decimal("0.20")),
+        "standard": {
+            "input": Decimal("1.25"),
+            "cached_input": Decimal("0.15"),
+            "output": Decimal("4.25"),
+        },
+        "contributor": {
+            "input": Decimal("0.10"),
+            "cached_input": Decimal("0.002"),
+            "output": Decimal("0.20"),
+        },
     },
     "offline": {
-        "standard": (Decimal("0"), Decimal("0")),
-        "contributor": (Decimal("0"), Decimal("0")),
+        "standard": {
+            "input": Decimal("0"),
+            "cached_input": Decimal("0"),
+            "output": Decimal("0"),
+        },
+        "contributor": {
+            "input": Decimal("0"),
+            "cached_input": Decimal("0"),
+            "output": Decimal("0"),
+        },
     },
+}
+
+# The (input, output) view of the card, kept for the callers that
+# price recorded calls — recorded usage carries no cached split.
+PRICE_TABLE: dict[str, dict[str, tuple[Decimal, Decimal]]] = {
+    profile: {
+        tier: (rates["input"], rates["output"])
+        for tier, rates in tiers.items()
+    }
+    for profile, tiers in RATE_CARD.items()
 }
 
 COST_PLACES = Decimal("0.000001")
 
 
-def call_cost(profile: str, tier: str, input_tokens: int, output_tokens: int) -> Decimal:
-    price_in, price_out = PRICE_TABLE[profile][tier]
+def call_cost(profile: str, tier: str, input_tokens: int, output_tokens: int,
+              cached_input_tokens: int = 0) -> Decimal:
+    """Price one call from the rate card. ``cached_input_tokens``
+    is the portion of ``input_tokens`` served from cache; it is
+    charged at the card's cached-input rate instead of the full
+    input rate. With no cached portion — every recorded call
+    today — a Standard 1M-in/1M-out Muse call is exactly
+    $5.500000 and a Contributor one exactly $0.300000."""
+    rates = RATE_CARD[profile][tier]
     cost = (
-        Decimal(input_tokens) * price_in + Decimal(output_tokens) * price_out
+        Decimal(input_tokens - cached_input_tokens) * rates["input"]
+        + Decimal(cached_input_tokens) * rates["cached_input"]
+        + Decimal(output_tokens) * rates["output"]
     ) / Decimal(1_000_000)
     return cost.quantize(COST_PLACES)
 
@@ -313,6 +368,10 @@ def _httpx_transport(url: str, headers: dict, body: dict) -> dict:
     return response.json()
 
 
+DEFAULT_META_MODEL = "muse-spark"
+DEFAULT_META_BASE_URL = "https://api.meta.ai/v1"
+
+
 class MetaMuseModelPort:
     """Muse Spark over the Meta Model API (OpenAI-compatible shape)."""
 
@@ -327,11 +386,12 @@ class MetaMuseModelPort:
             raise ProfileNotConfigured(
                 "profile 'meta-muse' selected but META_MODEL_API_KEY is not set"
             )
-        self.model_name = model or os.environ.get("META_MUSE_MODEL", "muse-spark")
+        self.model_name = model or os.environ.get(
+            "META_MUSE_MODEL", DEFAULT_META_MODEL)
         self.tier = tier
         self.base_url = (
             base_url or os.environ.get("META_MODEL_API_BASE_URL")
-            or "https://api.meta.ai/v1"
+            or DEFAULT_META_BASE_URL
         ).rstrip("/")
         self._transport = transport or _httpx_transport
 
@@ -364,21 +424,38 @@ class MetaMuseModelPort:
 
 
 class GovernedModelPort:
-    """Wraps a profile port and records every call in the cost ledger."""
+    """Wraps a profile port and records every call in the cost
+    ledger — and, since Round 12, assembles every call's context
+    under the context policy and records the assembly as an
+    insert-only ``context_assembly`` artefact. The call id is
+    computed from the context actually sent, so an uncompacted
+    call's id is exactly what it was before the discipline
+    existed; a compacted call is a different call and says so."""
 
-    def __init__(self, inner, store: SqlStore):
+    def __init__(self, inner, store: SqlStore, context_policy=None):
+        from .context import CONTEXT_POLICY
+
         self._inner = inner
         self._store = store
+        self._context_policy = context_policy or CONTEXT_POLICY
 
     @property
     def profile_name(self) -> str:
         return self._inner.profile_name
 
+    @property
+    def context_policy(self):
+        return self._context_policy
+
     def complete(self, run_id: str, system: str, prompt: str) -> ModelReply:
-        reply = self._inner.complete(system, prompt)
+        from .context import assemble_context
+
+        assembly = assemble_context(system, prompt, self._context_policy)
+        reply = self._inner.complete(assembly.system, assembly.prompt)
         cost = call_cost(reply.profile, reply.tier,
                          reply.input_tokens, reply.output_tokens)
-        material = f"{run_id}|{reply.profile}|{reply.model}|{reply.tier}|{system}|{prompt}"
+        material = (f"{run_id}|{reply.profile}|{reply.model}|{reply.tier}"
+                    f"|{assembly.system}|{assembly.prompt}")
         call_id = "CALL-" + hashlib.sha256(material.encode()).hexdigest()[:20]
         existing = {c.call_id for c in self._store.list_model_calls(run_id)}
         if call_id not in existing:
@@ -393,7 +470,35 @@ class GovernedModelPort:
                 cost_usd=str(cost),
             ))
         reply.call_id = call_id
+        self._record_context(run_id, reply, assembly)
         return reply
+
+    def _record_context(self, run_id: str, reply: ModelReply, assembly) -> None:
+        from .context import CONTEXT_KIND
+        from .models import Artefact
+        from .store import canonical_json
+
+        payload = {
+            "run_id": run_id,
+            "call_id": reply.call_id,
+            "profile": reply.profile,
+            "model": reply.model,
+            "tier": reply.tier,
+            **assembly.record(),
+        }
+        fingerprint = hashlib.sha256(
+            f"{run_id}|{reply.call_id}".encode()
+        ).hexdigest()
+        material = canonical_json({"payload": payload, "fp": fingerprint})
+        artefact_id = (
+            "CTX-" + hashlib.sha256(material.encode()).hexdigest()[:20]
+        )
+        if self._store.get_artefact(artefact_id) is not None:
+            return
+        self._store.insert_artefact(Artefact(
+            artefact_id=artefact_id, kind=CONTEXT_KIND,
+            payload=payload, input_fingerprint=fingerprint,
+        ))
 
     def reconcile(self, run_id: str) -> list[str]:
         """Recompute every recorded cost from the price table; the
@@ -423,3 +528,110 @@ def build_model_port(settings, store: SqlStore) -> GovernedModelPort:
             f"unknown model profile: {settings.model_profile!r}"
         )
     return GovernedModelPort(inner, store)
+
+
+# -- profile verification (Round 12) --------------------------------------
+#
+# The hosted profile's honest state, resolvable without a call.
+# ``profile_report`` never constructs a transport and never calls
+# out; ``probe_meta_muse`` runs one governed call through a
+# transport the CALLER supplies — in the test suite, a local double
+# of the Meta Model API — so the full path (request shape, auth,
+# tier stamp, ledger record, cost re-performance, context record)
+# is exercised with no network and no key. A live probe is a
+# deliberate act for whoever holds a real key; nothing here makes
+# one implicitly.
+
+PROBE_SYSTEM = "You verify model profiles. Answer exactly as asked."
+PROBE_PROMPT = "Reply with the single word: ready."
+PROBE_RUN_ID = "profile-probe"
+
+
+def profile_report(settings) -> dict:
+    """Resolve the configured profile and report its state.
+
+    ``live_call_made`` is always False: this report is resolution,
+    not verification by calling. For ``meta-muse`` the model id is
+    ``META_MUSE_MODEL`` or the built-in default ``muse-spark`` —
+    configurable and, until a live account confirms it, unverified;
+    the report says which source the id came from. Without a key
+    the status is ``not_configured`` and ``fail_closed`` records
+    that wiring the profile raised :class:`ProfileNotConfigured`,
+    proved here by attempting the construction.
+    """
+    report: dict = {
+        "profile": settings.model_profile,
+        "tier": settings.model_tier,
+        "rate_card_version": RATE_CARD_VERSION,
+        "live_call_made": False,
+        "verification": "stub_transport_only",
+    }
+    if settings.model_profile == "offline":
+        report.update(
+            status="ready", configured=True, key_required=False,
+            model=OfflineModelPort.model_name, base_url=None,
+        )
+        return report
+    if settings.model_profile != "meta-muse":
+        report.update(status="unknown_profile", configured=False)
+        return report
+    model_from_env = "META_MUSE_MODEL" in os.environ
+    report.update(
+        key_required=True,
+        key_present=bool(os.environ.get("META_MODEL_API_KEY")),
+        model=os.environ.get("META_MUSE_MODEL", DEFAULT_META_MODEL),
+        model_id_source=("environment" if model_from_env
+                         else "built-in default"),
+        model_id_verified=False,
+        base_url=(os.environ.get("META_MODEL_API_BASE_URL")
+                  or DEFAULT_META_BASE_URL).rstrip("/"),
+    )
+    if report["key_present"]:
+        # Prove the wiring constructs; the transport is never
+        # invoked, so this makes no call, live or otherwise.
+        MetaMuseModelPort(tier=settings.model_tier)
+        report.update(status="configured_unverified", configured=True)
+    else:
+        try:
+            MetaMuseModelPort(tier=settings.model_tier)
+            report.update(status="not_configured", configured=False,
+                          fail_closed=False)
+        except ProfileNotConfigured:
+            report.update(status="not_configured", configured=False,
+                          fail_closed=True)
+    return report
+
+
+def probe_meta_muse(store: SqlStore, *, api_key: str,
+                    tier: str = "standard", model: str | None = None,
+                    base_url: str | None = None,
+                    transport: Transport) -> dict:
+    """Exercise the ``meta-muse`` profile end to end against a
+    caller-supplied transport and report what the ledger recorded.
+
+    The probe call is an ordinary governed call — context record,
+    cost record, tier stamp — under the run id ``profile-probe``.
+    ``live_call_made`` in the report is False by construction: the
+    transport is the caller's, and in every use inside this
+    codebase it is a local double.
+    """
+    inner = MetaMuseModelPort(
+        api_key=api_key, model=model, tier=tier,
+        base_url=base_url, transport=transport,
+    )
+    port = GovernedModelPort(inner, store)
+    reply = port.complete(PROBE_RUN_ID, PROBE_SYSTEM, PROBE_PROMPT)
+    calls = store.list_model_calls(PROBE_RUN_ID)
+    return {
+        "profile": "meta-muse",
+        "model": reply.model,
+        "tier": reply.tier,
+        "base_url": inner.base_url,
+        "call_id": reply.call_id,
+        "reply_text": reply.text,
+        "calls_recorded": len(calls),
+        "cost_usd": calls[0].cost_usd if calls else None,
+        "reconcile_problems": port.reconcile(PROBE_RUN_ID),
+        "live_call_made": False,
+        "transport": "caller-supplied — no network call was made",
+    }
