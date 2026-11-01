@@ -223,9 +223,10 @@ service enforces it the same way for all of them.
   drafts, approvals, the plan or the board; the viewer holds no
   record permission. Verifies judge artefacts already in hand
   and are deliberately ungated: holding the artefact means a
-  gated read already happened. Identity is presented, not
-  authenticated — scoped tokens (Round 18) will authenticate a
-  presentation and resolve to the same `Caller`. In-process
+  gated read already happened. Identity is presented, and since
+  Round 18 it can be authenticated: a scoped token resolves to
+  the same `Caller`, carrying its scope set, and `allows` is
+  the role check intersected with the scopes. In-process
   flows (demo, eval gate, graph, parity walk) pass no caller and
   act as `INTERNAL_CALLER`, the stated owner-operator identity.
 - **Digests** (`digests.py`, Round 14): subscriptions and the
@@ -316,6 +317,78 @@ service enforces it the same way for all of them.
   CLI `review-pack-generate`, `review-packs`, `review-pack-verify`,
   `review-pack-status`, `review-pack-export`, `review-pack-exports`,
   `review-pack-export-verify`, `review-pack-publish`.
+- **Scoped tokens** (`tokens.py`, Round 18): the authentication
+  layer over the Round 13 pack. Issuance (gated `tokens:issue`,
+  the owner) validates the subject, the role and the scope set
+  against the pack — a scope the role does not hold refuses the
+  issuance whole — and records an `api_token` artefact carrying
+  a per-token salt and a salted PBKDF2-HMAC-SHA256 over the
+  secret's SHA-256 digest (60,000 rounds; the KDF runs over the
+  digest because the raw secret would be an HMAC key, and HMAC
+  zero-pads short keys, which would make a zero-extended secret
+  the same key). The bearer string (`<token_id>.<secret hex>`)
+  is returned once, in the issuance result, and exists nowhere
+  else. `authenticate` parses the string, re-derives the hash
+  and compares in constant time; every failure mode — malformed,
+  unknown, revoked, expired, mismatched — returns the anonymous
+  caller, so a bad token is indistinguishable from no token.
+  Status is derived per read (revoked over expired over active)
+  from the token artefact and its `api_token_revocation`
+  artefacts; revocation is an insert, nothing is deleted. The
+  surface caller resolution prefers a presented token over
+  presented identity headers: a token decides the caller alone.
+  When a token caller is refused an action for scope, the
+  service records an `api_token_refusal` artefact — deduped per
+  token and permission, inserted directly because recording a
+  refusal about tokens cannot itself sit behind the token gate.
+  Reads are owner-gated metadata projections; the secret, its
+  salt and its hash are not in them. The module's clock and
+  entropy are constructor seams (real UTC time and
+  `secrets.token_bytes` by default) so the parity walk and the
+  gates state time and randomness instead of sampling them.
+  Surfaces: `POST /tokens`, `GET /tokens`, `GET /tokens/{id}`,
+  `POST /tokens/{id}/revoke`; CLI `token-issue`, `tokens`,
+  `token-revoke`, and a global `--token` on every command.
+- **Webhooks** (`webhooks.py`, Round 18): owner-configured
+  subscriptions and the signed delivery of the record's
+  transitions. A subscription artefact names an http(s) URL and
+  a subset of the stated event kinds (`draft_awaiting_approval`,
+  `approval_recorded`, `quarantine_created`, `digest_generated`,
+  `review_pack_published`); the fold semantics are the digest
+  subscriptions' — unsubscribe supersedes, re-subscribe revives
+  or no-ops. The signing secret is generated or supplied at
+  configuration, shown once, and stored as ciphertext under a
+  keystream derived from the deployment key
+  (`Settings.webhook_key`, env `SMB_WEBHOOK_KEY`; with no key
+  configured a stated development constant is used, which
+  protects nothing and the module says so). The service fires
+  events from the operations themselves — quarantine on
+  exchange, screened-PASS verdicts, approval and rejection acts,
+  digest generation, pack publication — and `notify` builds the
+  payload under the notification discipline: event kind,
+  delivery id, subscription id, occurrence time, actor, artefact
+  ids; no figure and no content crosses. The body is signed
+  HMAC-SHA256 (`X-SMB-Signature: sha256=<hex>`, delivery id in
+  `X-SMB-Delivery`) and attempted through the delivery port —
+  production shape an HTTP POST (`http_deliver`), tests, demo
+  and evals a local double receiver that verifies the signature
+  and records what it accepted and rejected — up to three
+  attempts, one `webhook_delivery` artefact per attempt with
+  outcome and response class, and delivery never raises into
+  the firing operation. `verify_delivery` re-performs a recorded
+  delivery: the exact subscription state artefact that signed
+  it is pinned in the delivery record, and the signature is
+  recomputed from that state. Management is pack-gated
+  (`webhooks:write` the owner, `webhooks:read` owner and
+  operator) with the usual existence hiding. Surfaces:
+  `POST /webhooks`, `GET /webhooks`, `GET /webhooks/{id}`,
+  `POST /webhooks/{id}/unsubscribe`, `GET /webhook-deliveries`,
+  `GET /webhook-deliveries/{id}/verify`; CLI
+  `webhook-subscribe`, `webhooks`, `webhook-unsubscribe`,
+  `webhook-deliveries`, `webhook-verify`. The parity walk issues
+  and revokes a token and publishes a pack to a subscribed
+  double, so tokens and deliveries sit inside the byte-identical
+  snapshot.
 - **Object store port** (`objectstore.py`): filesystem by default,
   S3-compatible adapter when `SMB_S3_ENDPOINT` is set; the adapter
   fails closed on incomplete configuration. Round 1 wires the port;

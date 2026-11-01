@@ -16,13 +16,14 @@ from decimal import Decimal
 from pathlib import Path
 
 from . import generator
-from .access import ACCESS_PACK_VERSION, Caller
+from .access import ACCESS_PACK_VERSION, AccessRefused, Caller
 from .approvals import ApprovalRefused
 from .config import Settings, load_settings
 from .guardian import draft_content_hash
 from .models import Artefact
 from .reviewpacks import PackPublicationRefused
 from .service import CommerceService
+from .webhooks import LocalReceiver
 
 
 def build_demo_service(tmp: Path) -> CommerceService:
@@ -649,6 +650,62 @@ def main() -> int:
         queue_after = service.approval_queue()
         print(f"  the queue is unmoved: {len(queue_after['approved'])}"
               " approved — the refused attempt recorded no act")
+
+        print("\n== Tokens and webhooks — authenticated callers,"
+              " signed notifications ==")
+        print("  identity above was presented, not authenticated;"
+              " a token authenticates it. Maya issues one for the"
+              " operator, narrowed to facts and the cost summary —"
+              " the bearer string exists at issuance and nowhere"
+              " else; the record keeps a salted hash and metadata.")
+        issued = service.issue_token(
+            "Omar Operator", "operator", ["facts:read", "costs:read"])
+        token_caller = service.authenticate_token(issued.bearer)
+        print(f"  token {issued.token_id}: actor {token_caller.actor!r}"
+              f"  role {token_caller.role!r}"
+              f"  scopes {', '.join(sorted(token_caller.scopes or ()))}")
+        print(f"  in scope:"
+              f" {len(service.read_facts(None, token_caller))}"
+              " facts read through the token")
+        ledger_probe = service.read_latest_artefact(
+            "ledger", token_caller)
+        print(f"  out of scope: the ledger answers"
+              f" {'found' if ledger_probe else 'not found'}"
+              " — narrowed, exactly as a forbidden id answers")
+        try:
+            service.diagnose_stockout(token_caller)
+            print("  out-of-scope diagnosis: ACCEPTED — gate failed")
+        except AccessRefused as refused:
+            print(f"  out-of-scope diagnosis refused and recorded:"
+                  f" {', '.join(refused.problems)}")
+        forged = service.authenticate_token(issued.bearer + "00")
+        print(f"  a forged bearer resolves to"
+              f" {'an identified caller' if forged.identified else 'anonymous'}")
+        service.revoke_token(issued.token_id)
+        after = service.authenticate_token(issued.bearer)
+        print(f"  after revocation the same bearer resolves to"
+              f" {'an identified caller' if after.identified else 'anonymous'}")
+        print("  a webhook is a notification, not a document: the"
+              " payload carries the event, artefact ids, the actor"
+              " and the time — figures stay behind the gated reads.")
+        service.webhooks.deliver = LocalReceiver("demo-webhook-secret")
+        service.subscribe_webhook(
+            "https://hooks.example.invalid/demo",
+            ["digest_generated", "review_pack_published"],
+            signing_secret="demo-webhook-secret")
+        service.subscribe_digest("Vic Viewer", "viewer", "daily")
+        service.generate_digests("daily")
+        pack_two = service.generate_review_pack("2026-02")
+        service.publish_review_pack(pack_two.artefact_id, "Maya Chen")
+        for delivery in service.read_webhook_deliveries():
+            print(f"  delivered {delivery['event']}"
+                  f"  to {delivery['subscription_id']}"
+                  f"  attempt {delivery['attempt']}"
+                  f"  outcome {delivery['outcome']}"
+                  f"  signature verifies"
+                  f" {service.webhooks.verify_delivery(delivery['delivery_id'])}")
+        print("  delivery went to a local double that verifies the"
+              " signature — no real endpoint is called in the demo")
 
         print("\n== Model port (offline profile, governed) ==")
         reply = service.draft(
