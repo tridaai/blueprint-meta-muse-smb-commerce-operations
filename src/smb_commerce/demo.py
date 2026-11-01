@@ -10,6 +10,7 @@ offline profile and lands in the cost ledger like any other call.
 from __future__ import annotations
 
 import tempfile
+from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
 
@@ -47,6 +48,42 @@ def main() -> int:
               f"  facts accepted {report.accepted}  refused {report.refused}")
         for kind in sorted(counts):
             print(f"  {kind:<12} {counts[kind]}")
+
+        print("\n== Connector ports v2 — batches under contract ==")
+        batches = generator.build_batches()
+        print(f"  the dataset arrived as {len(batches)} exchange"
+              f" batches under contract version"
+              f" {batches[0]['contract_version']}:"
+              f" {', '.join(b['contract'] for b in batches)}")
+        replay = service.exchange_batch(batches[0])
+        print(f"  replaying the {batches[0]['contract']} batch:"
+              f" {replay.status}, {replay.duplicates} duplicates,"
+              f" {replay.accepted} accepted — a replay lands"
+              f" nothing twice ({service.store.count_facts()} facts)")
+        # A planted broken batch: the books feed resent under a
+        # version this code does not enforce, with one record
+        # stripped of its provenance. The contract judges the
+        # batch as a whole — it is quarantined whole, and the
+        # quarantine itself is on the record.
+        broken = deepcopy(batches[-1])
+        broken["contract_version"] = "1999.1.1"
+        broken["records"][3].pop("source_system")
+        before = service.store.count_facts()
+        quarantined = service.exchange_batch(broken)
+        q = quarantined.quarantine.payload
+        print(f"  broken {broken['contract']} batch:"
+              f" {quarantined.status} whole"
+              f" ({q['record_count']} records, none ingested:"
+              f" {service.store.count_facts()} facts, was {before})")
+        for violation in q["violations"]:
+            where = (f" record {violation['record_index']}"
+                     if "record_index" in violation else "")
+            print(f"    VIOLATION {violation['code']}{where}:"
+                  f" {violation['detail']}")
+        print(f"  quarantine {quarantined.quarantine.artefact_id}"
+              f" batch hash {q['batch_hash'][:12]}..."
+              f"  verified"
+              f" {not service.verify_quarantine(quarantined.quarantine)}")
 
         artefact = service.ledger.compute()
         problems = service.ledger.verify(artefact)

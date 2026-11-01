@@ -5,7 +5,8 @@ diagnose-verify, refusals, plan, plan-verify, plan-refusals,
 draft, drafts, drafts-verify, draft-refusals, screen, verdicts,
 verdicts-verify, awaiting-approval, queue, approve, reject,
 approvals-verify, approval-history, approval-refusals, board,
-board-verify, model-calls. The
+board-verify, connectors, quarantines, quarantine-verify,
+model-calls. The
 diagnose commands cover all five diagnoses (stockout, ad decay,
 expense anomalies, refund anomalies, and the email-flow audit);
 the plan commands assemble the growth plan from the computed
@@ -18,7 +19,10 @@ the acts, and approve/reject record the named human act —
 approved always reads "approved — not sent", because approval
 executes nothing. The board commands print the morning board —
 the operator's opening view, re-derived from the record on
-every call — and re-perform it end to end.
+every call — and re-perform it end to end. The connector
+commands read the Round 11 exchange contracts and the batches
+quarantined whole under them, and re-perform a quarantine
+artefact's hash chain.
 Output is plain text sized for a terminal; figures come from
 the ledger artefact, never recomputed on the fly by the CLI
 itself.
@@ -286,7 +290,8 @@ def main(argv: list[str] | None = None) -> int:
         "draft-refusals", "screen", "verdicts", "verdicts-verify",
         "awaiting-approval", "queue", "approve", "reject",
         "approvals-verify", "approval-history", "approval-refusals",
-        "board", "board-verify", "model-calls"])
+        "board", "board-verify", "connectors", "quarantines",
+        "quarantine-verify", "model-calls"])
     parser.add_argument("--kind", default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--draft", default=None)
@@ -565,6 +570,43 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"artefact_id": board.artefact_id,
                           "verified": not problems, "problems": problems}))
         return 0 if not problems else 1
+    if args.command == "connectors":
+        from .connectors import CONTRACTS, CONTRACT_VERSION
+
+        print(f"contract version {CONTRACT_VERSION}")
+        for contract in CONTRACTS.values():
+            print(f"{contract.name} shape={contract.shape}"
+                  f" source={contract.source_system}"
+                  f" kinds={','.join(contract.kinds)}"
+                  f" max_as_of_lag_days={contract.max_as_of_lag_days}")
+        print(f"{len(CONTRACTS)} contracts")
+        return 0
+    if args.command == "quarantines":
+        quarantines = service.quarantines()
+        for artefact in quarantines:
+            payload = artefact.payload
+            codes = ", ".join(
+                sorted({v["code"] for v in payload["violations"]}))
+            print(f"{artefact.artefact_id} contract={payload['contract']}"
+                  f" source={payload['source_system']}"
+                  f" records={payload['record_count']}"
+                  f" violations: {codes}")
+        print(f"{len(quarantines)} quarantined batches")
+        return 0
+    if args.command == "quarantine-verify":
+        status = 0
+        quarantines = service.quarantines()
+        for artefact in quarantines:
+            problems = service.verify_quarantine(artefact)
+            print(json.dumps({"artefact_id": artefact.artefact_id,
+                              "verified": not problems,
+                              "problems": problems}))
+            status = status or (1 if problems else 0)
+        if not quarantines:
+            print(json.dumps({"verified": False,
+                              "problems": ["no_quarantines"]}))
+            status = 1
+        return status
     if args.command == "model-calls":
         calls = service.store.list_model_calls(args.run_id)
         for call in calls:

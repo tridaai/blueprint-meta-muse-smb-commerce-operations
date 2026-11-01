@@ -3,7 +3,10 @@ artefacts and the cost ledger.
 
 Reads dominate by design; the only writes are the Round 8 approval
 acts (`POST /approvals/approve`, `POST /approvals/reject`), which
-record a named human's act and execute nothing. The morning board
+record a named human's act and execute nothing, and the Round 11
+connector exchange (`POST /connectors/exchange`), which judges a
+batch against its exchange contract and either ingests it through
+the port or quarantines it whole as a recorded artefact. The morning board
 (`/board`, Round 9) is a read too: it is re-derived from the
 record on every call and never stored. Every request gets
 a request id, echoed in the ``X-Request-Id`` header and stamped
@@ -464,6 +467,81 @@ def verify_board() -> dict:
     problems = service.board.verify(board)
     return {"artefact_id": board.artefact_id, "verified": not problems,
             "problems": problems}
+
+
+class ExchangeRequest(BaseModel):
+    envelope: dict
+
+
+@app.get("/connectors")
+def list_connectors() -> dict:
+    from .connectors import CONTRACTS, CONTRACT_VERSION
+
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "count": len(CONTRACTS),
+        "contracts": [
+            {
+                "name": c.name,
+                "shape": c.shape,
+                "source_system": c.source_system,
+                "kinds": list(c.kinds),
+                "pairs": [list(pair) for pair in c.pairs],
+                "max_as_of_lag_days": c.max_as_of_lag_days,
+            }
+            for c in CONTRACTS.values()
+        ],
+    }
+
+
+@app.post("/connectors/exchange")
+def exchange_batch(body: ExchangeRequest) -> dict:
+    service = get_service()
+    report = service.exchange_batch(body.envelope)
+    if report.status == "quarantined":
+        raise HTTPException(status_code=422, detail={
+            "quarantine_artefact_id": report.quarantine.artefact_id,
+            "batch_hash": report.batch_hash,
+            "violations": [v.as_dict() for v in report.violations],
+        })
+    return {
+        "status": report.status,
+        "contract": report.contract,
+        "batch_hash": report.batch_hash,
+        "accepted": report.accepted,
+        "duplicates": report.duplicates,
+        "refused": report.ingest.refused if report.ingest else 0,
+    }
+
+
+@app.get("/connectors/quarantines")
+def list_quarantines() -> dict:
+    service = get_service()
+    quarantines = service.quarantines()
+    return {"count": len(quarantines),
+            "quarantines": [q.model_dump() for q in quarantines]}
+
+
+@app.get("/connectors/quarantines/{quarantine_id}")
+def get_quarantine(quarantine_id: str) -> dict:
+    service = get_service()
+    artefact = service.connectors.quarantine(quarantine_id)
+    if artefact is None:
+        raise HTTPException(status_code=404,
+                            detail="quarantine not found")
+    return artefact.model_dump()
+
+
+@app.get("/connectors/quarantines/{quarantine_id}/verify")
+def verify_quarantine(quarantine_id: str) -> dict:
+    service = get_service()
+    artefact = service.connectors.quarantine(quarantine_id)
+    if artefact is None:
+        raise HTTPException(status_code=404,
+                            detail="quarantine not found")
+    problems = service.verify_quarantine(artefact)
+    return {"artefact_id": artefact.artefact_id,
+            "verified": not problems, "problems": problems}
 
 
 @app.get("/model-calls")
