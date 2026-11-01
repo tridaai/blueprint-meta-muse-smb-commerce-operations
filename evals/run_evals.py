@@ -312,6 +312,28 @@ Zero-tolerance counters:
                                    stated judgement does not
                                    resolve to the recorded
                                    judgement it names
+  - pack_figure_mismatches ....... a review pack the verifier
+                                   reports problems on — a figure
+                                   that does not re-resolve
+                                   against its cited artefact, a
+                                   section that does not
+                                   recompose, a stale pin — or a
+                                   genuine export carrying a
+                                   non-checksum verification
+                                   problem
+  - checksum_failures_accepted ... a tampered export body whose
+                                   verification comes back clean,
+                                   or a genuine export whose
+                                   checksum or manifest
+                                   re-performance names a problem
+  - unapproved_publications ...... a pack reading as published
+                                   without the owner's verifying
+                                   act — an operator's publication
+                                   attempt accepted or its refusal
+                                   misrecorded, a forged act
+                                   conferring published status, or
+                                   a published pack shown stale
+                                   without cause
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -368,6 +390,7 @@ from smb_commerce.modelport import (
 )
 from smb_commerce.models import Artefact
 from smb_commerce.plan import PlanRefused
+from smb_commerce.reviewpacks import PackPublicationRefused
 from smb_commerce.service import CommerceService
 from smb_commerce.store import SqlStore, canonical_json
 
@@ -415,6 +438,8 @@ def main() -> int:
         "spoofed_approvals_accepted",
         "image_finding_mismatches", "unprovenanced_images_accepted",
         "unlabelled_vision_findings",
+        "pack_figure_mismatches", "checksum_failures_accepted",
+        "unapproved_publications",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -2005,6 +2030,80 @@ def main() -> int:
             for f in tampered_listing.payload["findings"]
         }:
             counters["image_finding_mismatches"] += 1
+
+        # Review pack (Round 17): over the gate's own record —
+        # the pack re-performs clean, its export verifies clean,
+        # a tampered export body is refused by name, publication
+        # waits for the owner's act (an operator's attempt is
+        # refused and the refusal recorded; a forged act confers
+        # nothing), and a read by a role missing a section
+        # permission answers as absent.
+        pack = service.generate_review_pack("2026-01")
+        counters["pack_figure_mismatches"] += len(
+            service.review_packs.verify(pack))
+        if service.review_pack_status(
+                pack.artefact_id)["status"] != "draft":
+            counters["unapproved_publications"] += 1
+        pack_export = service.export_review_pack(pack.artefact_id)
+        for problem in service.review_packs.verify_export(pack_export):
+            if "checksum" in problem:
+                counters["checksum_failures_accepted"] += 1
+            else:
+                counters["pack_figure_mismatches"] += 1
+        export_key = pack_export.payload["object_key"]
+        genuine_body = service.objects.get(export_key)
+        service.objects.put(export_key, genuine_body.replace(
+            b'"month":"2026-01"', b'"month":"2026-02"', 1))
+        if not service.review_packs.verify_export(pack_export):
+            counters["checksum_failures_accepted"] += 1
+        service.objects.put(export_key, genuine_body)
+        if service.read_review_pack(
+                pack.artefact_id,
+                Caller("Bea Bookkeeper", "bookkeeper")) is not None:
+            counters["existence_leaks"] += 1
+        try:
+            service.publish_review_pack(
+                pack.artefact_id, "Olivia Operator",
+                caller=Caller("Olivia Operator", "operator"))
+            counters["unapproved_publications"] += 1
+        except PackPublicationRefused as refused_error:
+            if refused_error.refusal.payload["problems"] != [
+                    "actor_role_may_not_publish:operator"]:
+                counters["unapproved_publications"] += 1
+        if service.review_pack_status(
+                pack.artefact_id)["status"] != "draft":
+            counters["unapproved_publications"] += 1
+        forged_act = Artefact(
+            artefact_id="RPP-forged0000000000001",
+            kind="review_pack_publication",
+            payload={
+                "action": "publish",
+                "pack_artefact_id": pack.artefact_id,
+                "month": pack.payload["month"],
+                "pack_content_hash": "0" * 64,
+                "publisher": "Mallory",
+                "status": "published",
+                "display_status": "published",
+                "bound_pins": pack.payload["pins"],
+            },
+            input_fingerprint="forged",
+        )
+        service.store.insert_artefact(forged_act)
+        if not service.review_packs.verify_publication(forged_act):
+            counters["unapproved_publications"] += 1
+        if service.review_pack_status(
+                pack.artefact_id)["status"] != "draft":
+            counters["unapproved_publications"] += 1
+        service.publish_review_pack(pack.artefact_id, "Eval Owner")
+        published_status = service.review_pack_status(pack.artefact_id)
+        if (published_status["status"] != "published"
+                or published_status["stale"]):
+            counters["unapproved_publications"] += 1
+        published_export = service.export_review_pack(pack.artefact_id)
+        counters["checksum_failures_accepted"] += len([
+            problem for problem
+            in service.review_packs.verify_export(published_export)
+            if "checksum" in problem])
 
         # Cost analytics (Round 12): the summary over the gate's
         # own ledger must equal a hand sum over the recorded

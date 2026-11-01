@@ -78,6 +78,14 @@ EXPECTED = {
     "digests:generate": {"owner", "operator"},
     "subscriptions:read": {"owner", "operator"},
     "subscriptions:write": {"owner", "operator"},
+    # Round 17: the review-pack permissions. packs:read is the
+    # kind gate every staff role holds — a pack's content gate
+    # (the permissions its sections required) does the real
+    # work. Publication is the owner's named act, like
+    # approvals:act.
+    "packs:read": {"owner", "operator", "bookkeeper", "viewer"},
+    "packs:generate": {"owner", "operator"},
+    "packs:publish": {"owner"},
 }
 
 
