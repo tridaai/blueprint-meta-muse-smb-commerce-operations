@@ -6,7 +6,9 @@ draft, drafts, drafts-verify, draft-refusals, screen, verdicts,
 verdicts-verify, awaiting-approval, queue, approve, reject,
 approvals-verify, approval-history, approval-refusals, board,
 board-verify, connectors, quarantines, quarantine-verify,
-model-calls, model-profile, costs, contexts. The
+model-calls, model-profile, costs, contexts, subscriptions,
+subscribe, unsubscribe, digests, digest-generate, digest-verify.
+The
 diagnose commands cover all five diagnoses (stockout, ad decay,
 expense anomalies, refund anomalies, and the email-flow audit);
 the plan commands assemble the growth plan from the computed
@@ -35,6 +37,13 @@ internal identity (the terminal operator running their own
 deployment); with flags, reads answer with the absent form for
 roles that may not see a resource class, and forbidden actions
 refuse. A partial or unstated identity fails closed.
+
+Round 14: the subscription commands record who receives which
+digest (`--subscriber` / `--subscriber-role` name the staff
+member; `--actor` / `--role` remain the caller's own identity),
+`digest-generate` folds a cadence's digests into the record, and
+`digests` / `digest-verify` read them back under the same
+content gate the API applies. Nothing is sent anywhere.
 """
 
 from __future__ import annotations
@@ -308,10 +317,17 @@ def main(argv: list[str] | None = None) -> int:
         "approvals-verify", "approval-history", "approval-refusals",
         "board", "board-verify", "connectors", "quarantines",
         "quarantine-verify", "model-calls", "model-profile",
-        "costs", "contexts"])
+        "costs", "contexts", "subscriptions", "subscribe",
+        "unsubscribe", "digests", "digest-generate",
+        "digest-verify"])
     parser.add_argument("--kind", default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--draft", default=None)
+    parser.add_argument("--cadence", default=None)
+    parser.add_argument("--period-end", default=None)
+    parser.add_argument("--digest", default=None)
+    parser.add_argument("--subscriber", default=None)
+    parser.add_argument("--subscriber-role", default=None)
     parser.add_argument("--approver", default=None)
     parser.add_argument("--rejecter", default=None)
     parser.add_argument("--reason", default=None)
@@ -731,6 +747,98 @@ def main(argv: list[str] | None = None) -> int:
                   f" compacted {p['compacted']}")
         print(f"{len(records)} context records")
         return 0
+    if args.command == "subscriptions":
+        states = service.read_subscriptions(caller)
+        for state in states:
+            print(f"{state['subscription_id']}"
+                  f" {state['actor']} ({state['role']})"
+                  f" {state['cadence']}"
+                  f" active {state['active']}")
+        print(f"{len(states)} subscriptions")
+        return 0
+    if args.command in ("subscribe", "unsubscribe"):
+        if (not args.subscriber or not args.subscriber_role
+                or not args.cadence):
+            print(f"{args.command} requires --subscriber,"
+                  " --subscriber-role and --cadence")
+            return 2
+        try:
+            if args.command == "subscribe":
+                artefact = service.subscribe_digest(
+                    args.subscriber, args.subscriber_role,
+                    args.cadence, caller)
+            else:
+                artefact = service.unsubscribe_digest(
+                    args.subscriber, args.subscriber_role,
+                    args.cadence, caller)
+        except AccessRefused as refused:
+            print(f"REFUSED {args.command}:"
+                  f" {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
+        except ValueError as error:
+            print(f"REFUSED {args.command}: {error}")
+            return 1
+        if artefact is None:
+            print("no active subscription to end")
+            return 1
+        state = next(
+            s for s in service.digests.subscriptions()
+            if s["artefact_id"] == artefact.artefact_id)
+        print(f"{state['subscription_id']}"
+              f" {state['actor']} ({state['role']})"
+              f" {state['cadence']} active {state['active']}")
+        return 0
+    if args.command == "digest-generate":
+        if not args.cadence:
+            print("digest-generate requires --cadence")
+            return 2
+        try:
+            report = service.generate_digests(
+                args.cadence, args.period_end, caller)
+        except AccessRefused as refused:
+            print(f"REFUSED digest-generate:"
+                  f" {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
+        except ValueError as error:
+            print(f"REFUSED digest-generate: {error}")
+            return 1
+        period = report["period"]
+        print(f"{report['cadence']} digests"
+              f" {period['start']}..{period['end']}"
+              f" as of {report['as_of']}")
+        for entry in report["generated"]:
+            print(f"  {entry['status']}"
+                  f" {entry['digest_artefact_id']}"
+                  f" for {entry['actor']} ({entry['role']})")
+        print(f"{len(report['generated'])} digests"
+              " — generated into the record, sent nowhere")
+        return 0
+    if args.command == "digests":
+        digests = service.read_digests(args.cadence, caller)
+        for digest in digests:
+            p = digest.payload
+            print(f"{digest.artefact_id} {p['cadence']}"
+                  f" {p['period']['start']}..{p['period']['end']}"
+                  f" role {p['role']}"
+                  f" sections {', '.join(p['sections_included'])}")
+        print(f"{len(digests)} digests")
+        return 0
+    if args.command == "digest-verify":
+        if not args.digest:
+            print("digest-verify requires --digest")
+            return 2
+        digest = service.read_digest(args.digest, caller)
+        if digest is None:
+            print(json.dumps({"verified": False,
+                              "problems": ["no_digest"]}))
+            return 1
+        problems = service.digests.verify(digest)
+        print(json.dumps({"artefact_id": digest.artefact_id,
+                          "verified": not problems,
+                          "problems": problems}))
+        return 0 if not problems else 1
     return 2
 
 

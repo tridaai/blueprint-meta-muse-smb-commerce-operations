@@ -442,6 +442,47 @@ def main() -> int:
         print("  the board is re-derived from the record on every"
               " read — it stores nothing and edits nothing")
 
+        print("\n== Digests — the board's picture, kept per role ==")
+        service.subscribe_digest("Maya Chen", "owner", "daily")
+        service.subscribe_digest("Bea Bookkeeper", "bookkeeper", "daily")
+        service.subscribe_digest("Omar Operator", "operator", "weekly")
+        daily = service.generate_digests("daily")
+        weekly = service.generate_digests("weekly")
+        for report in (daily, weekly):
+            period = report["period"]
+            print(f"  {report['cadence']} period"
+                  f" {period['start']}..{period['end']}:")
+            for entry in report["generated"]:
+                digest = service.store.get_artefact(
+                    entry["digest_artefact_id"])
+                sections = ", ".join(
+                    digest.payload["sections_included"]) or "none"
+                print(f"    {entry['status']}"
+                      f" {entry['digest_artefact_id']}"
+                      f" for {entry['actor']} ({entry['role']})"
+                      f"  sections: {sections}"
+                      f"  verified"
+                      f" {not service.digests.verify(digest)}")
+        digests_before = len(service.store.list_artefacts("ops_digest"))
+        replay = service.generate_digests("daily")
+        digests_after = len(service.store.list_artefacts("ops_digest"))
+        print(f"  re-running the daily period:"
+              f" {', '.join(e['status'] for e in replay['generated'])}"
+              f" — {digests_after} digests on the record,"
+              f" was {digests_before}: nothing lands twice")
+        owner_digest_id = next(
+            e["digest_artefact_id"] for e in daily["generated"]
+            if e["role"] == "owner")
+        probed = service.read_digest(
+            owner_digest_id, Caller("Bea Bookkeeper", "bookkeeper"))
+        print(f"  the bookkeeper probes the owner's digest:"
+              f" {'found' if probed else 'not found'}"
+              " — its findings and approval sections are not"
+              " hers to read, so it answers as absent")
+        print("  digests are generated into the record and read"
+              " back through the surfaces — nothing is sent"
+              " anywhere")
+
         print("\n== Access control — the record answers to roles ==")
         print(f"  access pack {ACCESS_PACK_VERSION}"
               "  roles: owner, operator, bookkeeper, viewer")

@@ -13,6 +13,11 @@ dataset, compute the ledger, run all five diagnoses, assemble the
 plan, draft, screen, then exercise the approval queue
 deterministically (approve the awaiting drafts but the last, reject
 the last with a stated reason) and derive the morning board.
+Round 14 extends the walk past the board: subscribe the owner and
+the bookkeeper to the daily digest and the operator to the weekly,
+then generate both cadences — so the subscription fold and the
+per-role digest artefacts are graded byte-identical on both
+profiles too, inside the same snapshot.
 """
 
 from __future__ import annotations
@@ -41,7 +46,13 @@ def run_core_walk(service: CommerceService):
             awaiting[-1]["draft_artefact_id"], "parity-owner", "timing",
             "parity walk: the one rejection, by the book",
         )
-    return service.derive_board()
+    board = service.derive_board()
+    service.subscribe_digest("parity-owner", "owner", "daily")
+    service.subscribe_digest("parity-keeper", "bookkeeper", "daily")
+    service.subscribe_digest("parity-operator", "operator", "weekly")
+    service.generate_digests("daily")
+    service.generate_digests("weekly")
+    return board
 
 
 def snapshot(service: CommerceService, board) -> str:

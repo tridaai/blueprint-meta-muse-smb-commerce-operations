@@ -25,6 +25,14 @@ missing resource returns, the empty list a list returns, the
 empty summary a summary returns. Existence does not leak.
 `/health` and `/readiness` stay open: they are infrastructure
 probes and carry no record data.
+
+Round 14 adds the subscription and digest endpoints:
+`/subscriptions` (read the folded record, write a subscription
+or its unsubscription — writes execute nothing and send
+nothing), `/digests/generate` (fold the period's digests for the
+active subscriptions of one cadence), and the digest reads
+(`/digests`, `/digests/{id}`, `/digests/{id}/verify`), gated by
+the digest's own content exactly as the service gates them.
 """
 
 from __future__ import annotations
@@ -644,3 +652,113 @@ def contexts(request: Request) -> dict:
     records = service.context_records(_caller(request))
     return {"count": len(records),
             "contexts": [r.model_dump() for r in records]}
+
+
+class SubscriptionRequest(BaseModel):
+    actor: str
+    role: str
+    cadence: str
+
+
+class GenerateDigestsRequest(BaseModel):
+    cadence: str
+    period_end: str | None = None
+
+
+@app.get("/subscriptions")
+def list_subscriptions(request: Request) -> dict:
+    """The folded subscription record: who receives which
+    digest. Owner + operator only — a role that may not read it
+    gets the empty list."""
+    service = get_service()
+    states = service.read_subscriptions(_caller(request))
+    return {"count": len(states), "subscriptions": states}
+
+
+@app.post("/subscriptions")
+def subscribe(body: SubscriptionRequest, request: Request) -> dict:
+    """Record a staff member's digest subscription (or end one
+    via `/subscriptions/unsubscribe`). Records state only —
+    nothing is sent anywhere."""
+    service = get_service()
+    try:
+        artefact = service.subscribe_digest(
+            body.actor, body.role, body.cadence,
+            caller=_caller(request))
+    except AccessRefused as refused:
+        raise _forbidden(refused)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    state = next(
+        s for s in service.digests.subscriptions()
+        if s["artefact_id"] == artefact.artefact_id)
+    return state
+
+
+@app.post("/subscriptions/unsubscribe")
+def unsubscribe(body: SubscriptionRequest, request: Request) -> dict:
+    service = get_service()
+    try:
+        artefact = service.unsubscribe_digest(
+            body.actor, body.role, body.cadence,
+            caller=_caller(request))
+    except AccessRefused as refused:
+        raise _forbidden(refused)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+    if artefact is None:
+        raise HTTPException(status_code=404,
+                            detail="subscription not found")
+    state = next(
+        s for s in service.digests.subscriptions()
+        if s["artefact_id"] == artefact.artefact_id)
+    return state
+
+
+@app.post("/digests/generate")
+def generate_digests(body: GenerateDigestsRequest,
+                     request: Request) -> dict:
+    """Fold one cadence's digests for the period ending on
+    `period_end` (default: the head ledger's as-of), one per
+    active subscription, each assembled for its role. Generation
+    writes artefacts into the record; it sends nothing."""
+    service = get_service()
+    try:
+        return service.generate_digests(
+            body.cadence, body.period_end, caller=_caller(request))
+    except AccessRefused as refused:
+        raise _forbidden(refused)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+
+
+@app.get("/digests")
+def list_digests(request: Request,
+                 cadence: str | None = None) -> dict:
+    """The digests the caller's role may read — decided by each
+    digest's content, so a digest whose sections the caller may
+    not read is simply not in the list."""
+    service = get_service()
+    digests = service.read_digests(cadence, _caller(request))
+    return {"count": len(digests),
+            "digests": [d.model_dump() for d in digests]}
+
+
+@app.get("/digests/{digest_id}")
+def get_digest(digest_id: str, request: Request) -> dict:
+    service = get_service()
+    digest = service.read_digest(digest_id, _caller(request))
+    if digest is None:
+        raise HTTPException(status_code=404, detail="digest not found")
+    return digest.model_dump()
+
+
+@app.get("/digests/{digest_id}/verify")
+def verify_digest(digest_id: str, request: Request) -> dict:
+    service = get_service()
+    digest = service.read_digest(digest_id, _caller(request))
+    if digest is None:
+        raise HTTPException(status_code=404, detail="digest not found")
+    problems = service.digests.verify(digest)
+    return {"artefact_id": digest.artefact_id,
+            "verified": not problems, "problems": problems}
