@@ -20,6 +20,9 @@ vendor systems (local doubles)          the agent loop (LangGraph)
 
 Every surface — API, CLI, demo, graph — talks to one
 `CommerceService`, so a figure cannot drift between surfaces.
+Since Round 13 that service is also the access boundary: every
+surface resolves a caller (role pack, `access.py`) and the
+service enforces it the same way for all of them.
 
 ## Components
 
@@ -158,6 +161,38 @@ Every surface — API, CLI, demo, graph — talks to one
   `GET /costs`, `GET /model-profile`, `GET /contexts`, the CLI
   `costs` / `model-profile` / `contexts` commands, and the demo's
   closing beat.
+- **Access** (`access.py`, Round 13): the role pack over the
+  record. `ACCESS_PACK` (version `2026.11.1`) is data — four
+  staff roles (owner, operator, bookkeeper, viewer) and, per
+  permission, the roles that hold it — and enforcement lives in
+  the service, the one boundary both surfaces cross. A surface
+  resolves a presented identity through the one `resolve_caller`
+  (the `X-SMB-Actor` / `X-SMB-Role` headers on the API, the
+  `--actor` / `--role` flags on the CLI; for an approval act the
+  caller is the named approver acting in the stated role) and
+  passes a `Caller` down; an unresolvable identity is the
+  anonymous caller and holds nothing. Reads answer with the
+  absent form when the role may not see the resource class —
+  `None`, the empty list, the empty queue fold, the zero cost
+  summary — keyed by artefact kind through
+  `read_permission_for_kind`, so existence (and counts, and
+  totals) never leak. Actions raise `AccessRefused` before any
+  lookup of their target, except approval acts: a role-gated
+  approval records an approval-refusal artefact naming the role
+  problem and raises `ApprovalRefused`, the approvals module's
+  own pattern, identical for real and absent drafts. Only the
+  owner holds `approvals:act` — the operator runs ingest,
+  diagnoses, drafting and screening but cannot approve the
+  pipeline's output; the bookkeeper reads the money record
+  (facts, ledger, diagnoses, quarantines, costs) and nothing of
+  drafts, approvals, the plan or the board; the viewer holds no
+  record permission. Verifies judge artefacts already in hand
+  and are deliberately ungated: holding the artefact means a
+  gated read already happened. Identity is presented, not
+  authenticated — scoped tokens (Round 18) will authenticate a
+  presentation and resolve to the same `Caller`. In-process
+  flows (demo, eval gate, graph, parity walk) pass no caller and
+  act as `INTERNAL_CALLER`, the stated owner-operator identity.
 - **Object store port** (`objectstore.py`): filesystem by default,
   S3-compatible adapter when `SMB_S3_ENDPOINT` is set; the adapter
   fails closed on incomplete configuration. Round 1 wires the port;
