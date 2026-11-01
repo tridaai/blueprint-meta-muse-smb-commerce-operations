@@ -13,6 +13,7 @@ from . import generator
 from .approvals import ApprovalService
 from .board import BoardService
 from .config import Settings, load_settings
+from .connectors import ConnectorPort
 from .diagnosis import DiagnosisService
 from .drafting import DraftingService
 from .guardian import GuardianService
@@ -40,6 +41,7 @@ class CommerceService:
                 self.settings.sqlite_path, self.settings.migrations_dir
             )
         self.ingest = IngestPort(self.store)
+        self.connectors = ConnectorPort(self.store, self.ingest)
         self.ledger = LedgerService(self.store)
         self.diagnosis = DiagnosisService(self.store)
         self.plan = PlanService(self.store)
@@ -60,9 +62,19 @@ class CommerceService:
             log.info("dataset already present: %d duplicates, %d refused",
                      report.duplicates, report.refused)
             return report
-        report = generator.generate(self.ingest)
+        report = generator.generate_batches(self.connectors)
         log.info("dataset generated: %d facts accepted", report.accepted)
         return report
+
+    # -- connector exchange (Round 11) --------------------------------
+    def exchange_batch(self, envelope):
+        return self.connectors.exchange(envelope)
+
+    def quarantines(self):
+        return self.connectors.quarantines()
+
+    def verify_quarantine(self, artefact):
+        return self.connectors.verify(artefact)
 
     def dataset_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}

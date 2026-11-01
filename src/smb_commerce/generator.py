@@ -305,6 +305,65 @@ def generate(port: IngestPort) -> IngestReport:
     return report
 
 
+def build_batches() -> list[dict]:
+    """The whole dataset as v2 exchange batches (Round 11).
+
+    One envelope per contract, records in the dataset's own order,
+    the envelope as-of the dataset's final day — the local doubles'
+    conforming deliveries. Every item in ``build_fact_items``
+    belongs to exactly one contract's stated pairs; an item that
+    belongs to none is a generator bug and raises here rather than
+    silently dropping a fact."""
+    from .connectors import CONTRACT_VERSION, contract_for_pair
+
+    grouped: dict[str, list[dict]] = {}
+    for item in build_fact_items():
+        contract = contract_for_pair(item["kind"], item["source_system"])
+        if contract is None:
+            raise RuntimeError(
+                f"no exchange contract accepts "
+                f"({item['kind']}, {item['source_system']})")
+        grouped.setdefault(contract.name, []).append(item)
+    batches: list[dict] = []
+    for name, records in grouped.items():
+        from .connectors import CONTRACTS
+
+        contract = CONTRACTS[name]
+        batches.append({
+            "contract": contract.name,
+            "contract_version": CONTRACT_VERSION,
+            "source_system": contract.source_system,
+            "as_of": END.isoformat(),
+            "records": records,
+        })
+    return batches
+
+
+def generate_batches(port) -> IngestReport:
+    """Write the dataset through the connector port, batch by batch.
+
+    The aggregate reads as an ingest report: a batch quarantined
+    during generation is a generator bug (its facts are built to
+    conform), and raises like a refusal did in Round 1."""
+    from .ingest import IngestReport as _Report
+
+    aggregate = _Report()
+    for envelope in build_batches():
+        report = port.exchange(envelope)
+        if report.status != "accepted":
+            codes = sorted({v.code for v in report.violations})
+            raise RuntimeError(
+                f"generator batch quarantined under contract "
+                f"{envelope['contract']}: {codes}")
+        aggregate.accepted += report.ingest.accepted
+        aggregate.duplicates += report.ingest.duplicates
+        aggregate.refusals.extend(report.ingest.refusals)
+    if aggregate.refused:
+        reasons = sorted({r.reason for r in aggregate.refusals})
+        raise RuntimeError(f"generator facts refused at the port: {reasons}")
+    return aggregate
+
+
 def manifest_counts() -> dict[str, int]:
     """Expected fact counts per kind, derived from the constants."""
     counts: dict[str, int] = {}
