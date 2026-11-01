@@ -19,6 +19,10 @@ Planted patterns, each hand-computable from these constants:
   month, and the same charge appears again on 2025-11-15.
 - MISSING FLOW: the email platform defines five standard flows. The
   winback flow is not among them.
+- LISTING IMAGES (Round 16, at the end of this module): the mirror
+  has no image, the candle duo's image is below the listing pack's
+  size minimums, the vase's image shows the candle duo, and the
+  towel set's image is PNG bytes named as a JPEG.
 
 Period: 52 weeks, Monday 2025-01-06 to Sunday 2026-01-04. The as-of
 date of the dataset is its final day, 2026-01-04.
@@ -42,6 +46,7 @@ SOURCE_INVENTORY = "hartwell-warehouse"
 SOURCE_ADS = "hartwell-ads-manager"
 SOURCE_EMAIL = "hartwell-email-platform"
 SOURCE_FINANCE = "hartwell-books"
+SOURCE_STUDIO = "hartwell-studio"
 
 
 def money(value: Decimal) -> str:
@@ -60,6 +65,10 @@ class SkuSpec:
     unit_cost: Decimal
     refund_bps: int  # refunded units per 10,000 sold, floored per week
     target_end_on_hand: int
+    # The catalogue's declared product class for the SKU — what
+    # its listing image is declared to show (Round 16). The
+    # listing pack judges the vision judgement against this.
+    product_class: str
 
 
 def weekly_units(sku: str, week: int) -> int:
@@ -81,17 +90,23 @@ def weekly_units(sku: str, week: int) -> int:
 
 SKUS: tuple[SkuSpec, ...] = (
     SkuSpec("HW-DIN-001", "Stoneware Dinner Set, 16-piece",
-            Decimal("189.00"), Decimal("82.00"), 200, 480),
+            Decimal("189.00"), Decimal("82.00"), 200, 480,
+            "stoneware_dinner_set"),
     SkuSpec("HW-THR-002", "Washed Linen Throw",
-            Decimal("64.00"), Decimal("27.00"), 300, 210),
+            Decimal("64.00"), Decimal("27.00"), 300, 210,
+            "washed_linen_throw"),
     SkuSpec("HW-CAN-003", "Soy Candle Duo",
-            Decimal("38.00"), Decimal("13.50"), 150, 340),
+            Decimal("38.00"), Decimal("13.50"), 150, 340,
+            "soy_candle_duo"),
     SkuSpec("HW-VAS-004", "Ceramic Vase, Large",
-            Decimal("92.00"), Decimal("44.00"), 500, 160),
+            Decimal("92.00"), Decimal("44.00"), 500, 160,
+            "ceramic_vase"),
     SkuSpec("HW-TOW-005", "Turkish Cotton Towel Set",
-            Decimal("56.00"), Decimal("24.00"), 250, 390),
+            Decimal("56.00"), Decimal("24.00"), 250, 390,
+            "turkish_cotton_towel_set"),
     SkuSpec("HW-MIR-006", "Arched Wall Mirror",
-            Decimal("148.00"), Decimal("71.00"), 400, 110),
+            Decimal("148.00"), Decimal("71.00"), 400, 110,
+            "arched_wall_mirror"),
 )
 
 FAST_MOVER_SKU = "HW-THR-002"
@@ -370,3 +385,91 @@ def manifest_counts() -> dict[str, int]:
     for item in build_fact_items():
         counts[item["kind"]] = counts.get(item["kind"], 0) + 1
     return counts
+
+
+# -- product images (Round 16) -------------------------------------------
+#
+# The catalogue's listing images, pressed in code by
+# ``images.write_png`` — no external assets. The planted truth,
+# one case per listing-pack rule:
+#
+# - HEALTHY: the dinner set and the throw carry full-size PNGs
+#   whose embedded subject is the SKU's own declared class.
+# - SMALL IMAGE: the candle duo's image is 240x180, below the
+#   pack's 800x800 minimums.
+# - VISION MISMATCH: the vase's image is a healthy PNG whose
+#   embedded subject is the candle duo's class — the wrong
+#   product's photograph on the vase's listing.
+# - FORMAT MISMATCH: the towel set's image is PNG bytes in a
+#   file named ``.jpg`` — the filename claims JPEG, the bytes
+#   measure PNG.
+# - NO IMAGE: the mirror has no image at all.
+
+IMAGE_SIZE = (1200, 900)
+SMALL_IMAGE_SIZE = (240, 180)
+SMALL_IMAGE_SKU = "HW-CAN-003"
+VISION_MISMATCH_SKU = "HW-VAS-004"
+VISION_MISMATCH_SUBJECT = "soy_candle_duo"
+FORMAT_MISMATCH_SKU = "HW-TOW-005"
+IMAGELESS_SKU = "HW-MIR-006"
+
+_IMAGE_RGB: dict[str, tuple[int, int, int]] = {
+    "HW-DIN-001": (196, 120, 86),
+    "HW-THR-002": (150, 160, 140),
+    "HW-CAN-003": (210, 180, 90),
+    "HW-VAS-004": (120, 140, 180),
+    "HW-TOW-005": (170, 170, 170),
+}
+
+
+def build_image_items() -> list[dict]:
+    """The planted listing images as image-intake items, in
+    catalogue order. The mirror is absent by construction."""
+    from .images import write_png
+
+    items: list[dict] = []
+    for spec in SKUS:
+        if spec.sku == IMAGELESS_SKU:
+            continue
+        width, height = (
+            SMALL_IMAGE_SIZE if spec.sku == SMALL_IMAGE_SKU
+            else IMAGE_SIZE
+        )
+        subject = (
+            VISION_MISMATCH_SUBJECT if spec.sku == VISION_MISMATCH_SKU
+            else spec.product_class
+        )
+        filename = (
+            f"{spec.sku.lower()}-hero.jpg"
+            if spec.sku == FORMAT_MISMATCH_SKU
+            else f"{spec.sku.lower()}-hero.png"
+        )
+        items.append({
+            "sku": spec.sku,
+            "filename": filename,
+            "data": write_png(width, height, _IMAGE_RGB[spec.sku],
+                              subject_class=subject),
+            "declared_class": spec.product_class,
+            "source_system": SOURCE_STUDIO,
+            "as_of": END.isoformat(),
+        })
+    return items
+
+
+def generate_images(port) -> IngestReport:
+    """Write the planted images through the image intake port;
+    refuse nothing — a refusal is a generator bug, as with the
+    fact dataset."""
+    report = IngestReport()
+    for item in build_image_items():
+        outcome = port.ingest_image(**item)
+        if outcome.status == "accepted":
+            report.accepted += 1
+        elif outcome.status == "duplicate":
+            report.duplicates += 1
+        else:
+            report.refusals.append(outcome)
+    if report.refused:
+        reasons = sorted({r.reason for r in report.refusals})
+        raise RuntimeError(f"generator images refused at the port: {reasons}")
+    return report

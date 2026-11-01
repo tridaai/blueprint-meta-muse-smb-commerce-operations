@@ -12,7 +12,8 @@ from typing import Annotated, Any
 
 from pydantic import AfterValidator, BaseModel, Field
 
-FACT_KINDS = ("order", "refund", "inventory", "ad_daily", "email_flow", "expense")
+FACT_KINDS = ("order", "refund", "inventory", "ad_daily", "email_flow",
+              "expense", "product_image")
 
 
 def _finite_money(value: str) -> str:
@@ -93,6 +94,28 @@ class ExpensePayload(BaseModel):
     amount: MoneyStr  # Decimal as string
 
 
+class ProductImagePayload(BaseModel):
+    """A product image as measured at the image intake port
+    (Round 16): the bytes live in the object store under
+    ``object_key``; this payload is the measurement of them —
+    the sniffed format and dimensions, the content hash, and
+    the catalogue class the image is declared to show. The
+    filename's claimed format rides along as ``declared_format``
+    so the listing pack can judge the claim against the
+    measurement."""
+
+    sku: str
+    filename: str
+    declared_format: str
+    format: str
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    byte_count: int = Field(gt=0)
+    content_hash: str
+    object_key: str
+    declared_class: str
+
+
 PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "order": OrderPayload,
     "refund": RefundPayload,
@@ -100,6 +123,7 @@ PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "ad_daily": AdDailyPayload,
     "email_flow": EmailFlowPayload,
     "expense": ExpensePayload,
+    "product_image": ProductImagePayload,
 }
 
 

@@ -39,6 +39,15 @@ profile end to end against a caller-supplied transport (the test
 suite's local double). Neither makes a live call: there is no Meta
 Model API key in hand, and the hosted profile's live leg stays
 honestly pending until one exists.
+
+Round 16 adds the vision call shape, ``analyse_image``: one
+governed method beside ``complete``, with the same ledger and
+context records. The offline profile judges deterministically
+from the subject class embedded in the image bytes at fixture
+construction; ``meta-muse`` shapes the OpenAI-compatible
+multimodal message (text plus the image as a data URI) over the
+same transport — stub-tested only, fail-closed without a key,
+and no live vision call has been made either.
 """
 
 from __future__ import annotations
@@ -359,6 +368,34 @@ def compose_screen_reply(prompt: str) -> str | None:
     return json.dumps({"rules": rules}, sort_keys=True)
 
 
+class VisionUnsupported(RuntimeError):
+    """A profile port was asked for a vision call it does not shape."""
+
+
+#: The port's stated per-image token allowance, charged to a
+#: vision call's input count when the profile does not report
+#: usage of its own. An estimate, stated as one — the same
+#: spirit as the context policy's word-count method.
+IMAGE_TOKEN_ALLOWANCE = 1024
+
+
+def compose_vision_reply(image_data: bytes) -> str:
+    """The offline profile's vision judgement, deterministically:
+    the subject class embedded in the image bytes at fixture
+    construction (the PNG ``tEXt`` ground truth), or
+    ``unlabelled`` when the bytes carry none. The double reads
+    the asset's embedded metadata the way a catalogue feed's
+    would be read — it never guesses at pixels, and an image
+    with nothing embedded is judged as carrying nothing."""
+    from .images import embedded_subject
+
+    subject = embedded_subject(image_data)
+    return json.dumps(
+        {"subject_class": subject if subject else "unlabelled"},
+        sort_keys=True,
+    )
+
+
 class OfflineModelPort:
     """Deterministic offline composer.
 
@@ -388,6 +425,23 @@ class OfflineModelPort:
             model=self.model_name,
             tier=self.tier,
             input_tokens=len((system + " " + prompt).split()),
+            output_tokens=len(text.split()),
+        )
+
+    def analyse_image(self, system: str, prompt: str,
+                      image_data: bytes, image_format: str) -> ModelReply:
+        """The vision call shape, offline: the reply is the
+        composed judgement over the image bytes (see
+        :func:`compose_vision_reply`); the image enters the
+        token count at the port's stated allowance."""
+        text = compose_vision_reply(image_data)
+        return ModelReply(
+            text=text,
+            profile=self.profile_name,
+            model=self.model_name,
+            tier=self.tier,
+            input_tokens=(len((system + " " + prompt).split())
+                          + IMAGE_TOKEN_ALLOWANCE),
             output_tokens=len(text.split()),
         )
 
@@ -459,6 +513,55 @@ class MetaMuseModelPort:
             output_tokens=int(usage.get("completion_tokens", 0)),
         )
 
+    def analyse_image(self, system: str, prompt: str,
+                      image_data: bytes, image_format: str) -> ModelReply:
+        """The vision call shape (Round 16): the OpenAI-compatible
+        multimodal message — the text prompt and the image as a
+        data URI — over the same transport, with the same tier
+        stamp. Fail-closed exactly like ``complete``: the port
+        only exists when a key configured it. No live call is
+        made anywhere in this codebase; the suite grades this
+        shape against a local double."""
+        import base64
+
+        data_uri = (
+            f"data:image/{image_format};base64,"
+            + base64.b64encode(image_data).decode("ascii")
+        )
+        body = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url",
+                     "image_url": {"url": data_uri}},
+                ]},
+            ],
+        }
+        data = self._transport(
+            f"{self.base_url}/chat/completions",
+            {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            body,
+        )
+        text = data["choices"][0]["message"]["content"]
+        usage = data.get("usage", {})
+        return ModelReply(
+            text=text,
+            profile=self.profile_name,
+            model=self.model_name,
+            tier=self.tier,
+            input_tokens=int(usage.get(
+                "prompt_tokens",
+                len((system + " " + prompt).split())
+                + IMAGE_TOKEN_ALLOWANCE)),
+            output_tokens=int(usage.get(
+                "completion_tokens", len(text.split()))),
+        )
+
 
 class GovernedModelPort:
     """Wraps a profile port and records every call in the cost
@@ -493,6 +596,47 @@ class GovernedModelPort:
                          reply.input_tokens, reply.output_tokens)
         material = (f"{run_id}|{reply.profile}|{reply.model}|{reply.tier}"
                     f"|{assembly.system}|{assembly.prompt}")
+        call_id = "CALL-" + hashlib.sha256(material.encode()).hexdigest()[:20]
+        existing = {c.call_id for c in self._store.list_model_calls(run_id)}
+        if call_id not in existing:
+            self._store.insert_model_call(ModelCallRecord(
+                call_id=call_id,
+                run_id=run_id,
+                profile=reply.profile,
+                model=reply.model,
+                tier=reply.tier,
+                input_tokens=reply.input_tokens,
+                output_tokens=reply.output_tokens,
+                cost_usd=str(cost),
+            ))
+        reply.call_id = call_id
+        self._record_context(run_id, reply, assembly)
+        return reply
+
+    def analyse_image(self, run_id: str, system: str, prompt: str,
+                      image_data: bytes, image_format: str) -> ModelReply:
+        """A governed vision call (Round 16): the same discipline
+        as ``complete`` — context assembled from the text alone
+        (image bytes never enter a text context), the call
+        recorded in the cost ledger, a context record written.
+        The call id's material carries the image's content hash,
+        so a call is identified by the exact bytes judged."""
+        from .context import assemble_context
+
+        inner_analyse = getattr(self._inner, "analyse_image", None)
+        if inner_analyse is None:
+            raise VisionUnsupported(
+                f"profile {self._inner.profile_name!r} does not "
+                f"shape vision calls"
+            )
+        assembly = assemble_context(system, prompt, self._context_policy)
+        reply = inner_analyse(
+            assembly.system, assembly.prompt, image_data, image_format)
+        cost = call_cost(reply.profile, reply.tier,
+                         reply.input_tokens, reply.output_tokens)
+        image_hash = hashlib.sha256(image_data).hexdigest()
+        material = (f"{run_id}|{reply.profile}|{reply.model}|{reply.tier}"
+                    f"|{assembly.system}|{assembly.prompt}|{image_hash}")
         call_id = "CALL-" + hashlib.sha256(material.encode()).hexdigest()[:20]
         existing = {c.call_id for c in self._store.list_model_calls(run_id)}
         if call_id not in existing:
