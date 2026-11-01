@@ -17,9 +17,10 @@ from .connectors import ConnectorPort
 from .diagnosis import DiagnosisService
 from .drafting import DraftingService
 from .guardian import GuardianService
+from .costs import CostAnalytics
 from .ingest import IngestPort, IngestReport
 from .ledger import LedgerService
-from .modelport import GovernedModelPort, build_model_port
+from .modelport import GovernedModelPort, build_model_port, profile_report
 from .objectstore import ObjectStore, build_object_store
 from .plan import PlanService
 from .store import SqlStore
@@ -105,6 +106,21 @@ class CommerceService:
     # -- model -------------------------------------------------------------
     def draft(self, run_id: str, system: str, prompt: str):
         return self.model.complete(run_id, system, prompt)
+
+    # -- profile and costs (Round 12) -------------------------------------
+    def model_profile_report(self):
+        return profile_report(self.settings)
+
+    def cost_summary(self):
+        return CostAnalytics(self.store).summary()
+
+    def cost_reconcile(self):
+        return CostAnalytics(self.store).reconcile_all()
+
+    def context_records(self):
+        from .context import CONTEXT_KIND
+
+        return self.store.list_artefacts(CONTEXT_KIND)
 
     # -- drafting ------------------------------------------------------------
     def draft_plan_narrative(self):

@@ -454,6 +454,34 @@ def main() -> int:
         print(f"  profile {reply.profile}  model {reply.model}  tier {reply.tier}")
         print(f"  calls recorded {len(calls)}  run total ${total}"
               f"  reconcile problems {service.model.reconcile('demo-run')}")
+
+        print("\n== Context and cost — the governed record ==")
+        report = service.model_profile_report()
+        print(f"  profile {report['profile']}  status {report['status']}"
+              f"  tier {report['tier']}"
+              f"  rate card {report['rate_card_version']}"
+              f"  live call made {report['live_call_made']}")
+        contexts = service.context_records()
+        demo_ctx = next(
+            r for r in contexts if r.payload["run_id"] == "demo-run")
+        ctxp = demo_ctx.payload
+        print(f"  context policy {ctxp['policy_version']}"
+              f"  budget {ctxp['budget_tokens']} tokens"
+              f"  demo-run context {ctxp['tokens_before']}"
+              f" -> {ctxp['tokens_after']}"
+              f"  compacted {ctxp['compacted']}")
+        print(f"  {len(contexts)} context records"
+              f" — one per governed call, each re-performable")
+        summary = service.cost_summary()
+        ctotal = summary["total"]
+        print(f"  cost analytics: {ctotal['calls']} calls"
+              f"  in {ctotal['input_tokens']}"
+              f"  out {ctotal['output_tokens']}"
+              f"  total ${ctotal['cost_usd']}"
+              f"  reconcile problems {summary['reconcile_problems']}")
+        for name, bucket in sorted(summary["by_tier"].items()):
+            print(f"    tier {name}: {bucket['calls']} calls"
+                  f"  ${bucket['cost_usd']}")
     return 0
 
 

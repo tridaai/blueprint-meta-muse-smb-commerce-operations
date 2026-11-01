@@ -8,7 +8,11 @@ connector exchange (`POST /connectors/exchange`), which judges a
 batch against its exchange contract and either ingests it through
 the port or quarantines it whole as a recorded artefact. The morning board
 (`/board`, Round 9) is a read too: it is re-derived from the
-record on every call and never stored. Every request gets
+record on every call and never stored. Round 12 adds three reads
+over the governed model record: `/model-profile` (the configured
+profile resolved, never called), `/costs` (the cost ledger
+aggregated and reconciled) and `/contexts` (the per-call context
+records). Every request gets
 a request id, echoed in the ``X-Request-Id`` header and stamped
 into the JSON logs.
 """
@@ -549,3 +553,32 @@ def list_model_calls(run_id: str | None = None) -> dict:
     service = get_service()
     calls = service.store.list_model_calls(run_id)
     return {"count": len(calls), "calls": [c.model_dump() for c in calls]}
+
+
+@app.get("/model-profile")
+def model_profile() -> dict:
+    """The configured model profile, resolved — never called.
+    For ``meta-muse`` the report carries the model id and its
+    source, the base URL, the tier and whether a key is present;
+    ``live_call_made`` is always False (Round 12)."""
+    service = get_service()
+    return service.model_profile_report()
+
+
+@app.get("/costs")
+def costs() -> dict:
+    """Cost analytics over the recorded ledger: totals and
+    breakdowns by profile, tier, model and run, priced by the
+    versioned rate card, with the reconciliation result."""
+    service = get_service()
+    return service.cost_summary()
+
+
+@app.get("/contexts")
+def contexts() -> dict:
+    """The context records: one insert-only artefact per governed
+    call, carrying its policy version, budget and token counts."""
+    service = get_service()
+    records = service.context_records()
+    return {"count": len(records),
+            "contexts": [r.model_dump() for r in records]}

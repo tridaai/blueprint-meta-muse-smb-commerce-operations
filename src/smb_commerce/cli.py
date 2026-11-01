@@ -6,7 +6,7 @@ draft, drafts, drafts-verify, draft-refusals, screen, verdicts,
 verdicts-verify, awaiting-approval, queue, approve, reject,
 approvals-verify, approval-history, approval-refusals, board,
 board-verify, connectors, quarantines, quarantine-verify,
-model-calls. The
+model-calls, model-profile, costs, contexts. The
 diagnose commands cover all five diagnoses (stockout, ad decay,
 expense anomalies, refund anomalies, and the email-flow audit);
 the plan commands assemble the growth plan from the computed
@@ -291,7 +291,8 @@ def main(argv: list[str] | None = None) -> int:
         "awaiting-approval", "queue", "approve", "reject",
         "approvals-verify", "approval-history", "approval-refusals",
         "board", "board-verify", "connectors", "quarantines",
-        "quarantine-verify", "model-calls"])
+        "quarantine-verify", "model-calls", "model-profile",
+        "costs", "contexts"])
     parser.add_argument("--kind", default=None)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--draft", default=None)
@@ -614,6 +615,45 @@ def main(argv: list[str] | None = None) -> int:
                   f" tier={call.tier} in={call.input_tokens}"
                   f" out={call.output_tokens} cost={call.cost_usd}")
         print(f"{len(calls)} calls")
+        return 0
+    if args.command == "model-profile":
+        report = service.model_profile_report()
+        for key in ("profile", "status", "model", "tier", "base_url",
+                    "key_required", "key_present", "fail_closed",
+                    "rate_card_version", "live_call_made"):
+            if key in report:
+                print(f"{key} {report[key]}")
+        return 0 if report["status"] in (
+            "ready", "configured_unverified") else 1
+    if args.command == "costs":
+        summary = service.cost_summary()
+        total = summary["total"]
+        print(f"rate card {summary['rate_card_version']}"
+              f"  calls {total['calls']}"
+              f"  in {total['input_tokens']}  out {total['output_tokens']}"
+              f"  cost ${total['cost_usd']}")
+        for label, breakdown in (
+            ("profile", summary["by_profile"]),
+            ("tier", summary["by_tier"]),
+            ("model", summary["by_model"]),
+            ("run", summary["by_run"]),
+        ):
+            for name, bucket in sorted(breakdown.items()):
+                print(f"  by {label} {name}: calls {bucket['calls']}"
+                      f"  cost ${bucket['cost_usd']}")
+        problems = summary["reconcile_problems"]
+        print(f"reconcile problems {problems}")
+        return 0 if not problems else 1
+    if args.command == "contexts":
+        records = service.context_records()
+        for record in records:
+            p = record.payload
+            print(f"{record.artefact_id} run={p['run_id']}"
+                  f" call={p['call_id']} policy {p['policy_version']}"
+                  f" tokens {p['tokens_before']} -> {p['tokens_after']}"
+                  f" budget {p['budget_tokens']}"
+                  f" compacted {p['compacted']}")
+        print(f"{len(records)} context records")
         return 0
     return 2
 
