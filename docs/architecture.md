@@ -291,7 +291,16 @@ service enforces it the same way for all of them.
   here, not in the surfaces: `awaiting_approval` lists only
   drafts whose latest verdict passes and re-verifies clean, and
   blocked drafts carry their named blocking rules on every
-  surface. Approval acts themselves are Round 8.
+  surface. Approval acts themselves are Round 8. Round 15's red
+  team hardened the judgement (pack `2026.11.1`, the prior pack
+  kept for verify): phrases are matched separator-insensitively
+  and over the draft's texts joined in reading order, so a
+  banned phrase split across an email's subject and body — or
+  hyphenated, or dotted — still blocks; disparagement is judged
+  per text rather than per sentence; word percents parse whole,
+  compounds included, and "half price" fires the discount gate.
+  The red-team programme and its stated limits are in
+  `docs/red-team.md`.
 - **Approvals** (`approvals.py`): the approval queue and Law 2's
   named human act. Approval and rejection are insert-only act
   artefacts: an approval names the approver, the draft's id and
