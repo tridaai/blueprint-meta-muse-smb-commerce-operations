@@ -290,6 +290,28 @@ Zero-tolerance counters:
                                    a human other than the calling
                                    actor, or recorded on a
                                    guardian-blocked draft
+  - image_finding_mismatches ..... a listing-quality finding set
+                                   that does not name exactly the
+                                   planted image truth (missing,
+                                   below minimums, format claim,
+                                   vision mismatch), a stored set
+                                   the verifier reports problems
+                                   on, or a tampered image whose
+                                   hash mismatch a fresh
+                                   diagnosis does not name
+  - unprovenanced_images_accepted  an image without a source
+                                   system or an as-of accepted at
+                                   the image intake port, or a
+                                   stored image fact lacking
+                                   provenance
+  - unlabelled_vision_findings ... a vision judgement artefact
+                                   missing any of its labels
+                                   (profile, model, tier, pack
+                                   version, call id), or a
+                                   vision-mismatch finding whose
+                                   stated judgement does not
+                                   resolve to the recorded
+                                   judgement it names
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -391,6 +413,8 @@ def main() -> int:
         "duplicate_digests",
         "injection_successes", "forgery_acceptances",
         "spoofed_approvals_accepted",
+        "image_finding_mismatches", "unprovenanced_images_accepted",
+        "unlabelled_vision_findings",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -1901,6 +1925,86 @@ def main() -> int:
             pass
         if inj.store.list_artefacts("draft_plan_narrative"):
             counters["injection_successes"] += 1
+
+        # Listing quality (Round 16): over its own fixture
+        # record — the planted image truth named exactly, every
+        # vision judgement carrying its labels, an
+        # unprovenanced image refused at the intake port, and
+        # tampered bytes breaking verification of the finding
+        # set that trusted them.
+        img_settings = Settings(
+            database_url="", sqlite_path=tmp_path / "listing.db",
+            migrations_dir=base.migrations_dir,
+            object_dir=tmp_path / "listing-objects",
+            s3_endpoint="", s3_bucket=base.s3_bucket,
+            model_profile="offline", model_tier="standard",
+            log_level="WARNING",
+        )
+        img = CommerceService(img_settings)
+        img.generate_dataset()
+        img.ledger.compute()
+        img.generate_product_images()
+        for fact in img.store.list_facts("product_image"):
+            if not fact.source_system or not fact.as_of:
+                counters["unprovenanced_images_accepted"] += 1
+        refused_image = img.ingest_product_image(
+            sku="HW-DIN-001", filename="sneaky.png",
+            data=generator.build_image_items()[0]["data"],
+            declared_class="stoneware_dinner_set",
+            source_system=None, as_of=None)
+        if (refused_image.status != "refused"
+                or refused_image.reason != "missing_provenance"):
+            counters["unprovenanced_images_accepted"] += 1
+        listing = img.diagnose_listing_quality()
+        counters["image_finding_mismatches"] += len(
+            img.listing.verify(listing))
+        named_images = {(f["class"], f["sku"])
+                        for f in listing.payload["findings"]}
+        expected_images = {
+            ("missing_image", generator.IMAGELESS_SKU),
+            ("below_min_dimensions", generator.SMALL_IMAGE_SKU),
+            ("format_mismatch", generator.FORMAT_MISMATCH_SKU),
+            ("vision_mismatch", generator.VISION_MISMATCH_SKU),
+        }
+        if named_images != expected_images:
+            counters["image_finding_mismatches"] += 1
+        if listing.payload["unjudged"]:
+            counters["image_finding_mismatches"] += 1
+        for judgement in img.store.list_artefacts(
+                "image_vision_judgement"):
+            jp = judgement.payload
+            if not all(jp.get(field) for field in (
+                    "profile", "model", "tier", "pack_version",
+                    "call_id")):
+                counters["unlabelled_vision_findings"] += 1
+        for finding in listing.payload["findings"]:
+            if finding["class"] != "vision_mismatch":
+                continue
+            judgement = img.store.get_artefact(
+                finding["judgement_artefact_id"])
+            if (judgement is None
+                    or finding["judgement_profile"]
+                    != judgement.payload["profile"]
+                    or finding["judgement_model"]
+                    != judgement.payload["model"]
+                    or finding["judged_class"]
+                    != judgement.payload["subject_class"]):
+                counters["unlabelled_vision_findings"] += 1
+        img_facts = {f.payload["sku"]: f
+                     for f in img.store.list_facts("product_image")}
+        dinner = img_facts["HW-DIN-001"].payload
+        throw = img_facts["HW-THR-002"].payload
+        img.objects.put(
+            dinner["object_key"],
+            img.objects.get(throw["object_key"]))
+        if not img.listing.verify(listing):
+            counters["image_finding_mismatches"] += 1
+        tampered_listing = img.diagnose_listing_quality()
+        if ("hash_mismatch", "HW-DIN-001") not in {
+            (f["class"], f["sku"])
+            for f in tampered_listing.payload["findings"]
+        }:
+            counters["image_finding_mismatches"] += 1
 
         # Cost analytics (Round 12): the summary over the gate's
         # own ledger must equal a hand sum over the recorded

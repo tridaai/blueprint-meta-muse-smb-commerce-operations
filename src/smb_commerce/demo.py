@@ -212,6 +212,50 @@ def main() -> int:
                   f"  delays {pp['step_delays_hours']}"
                   f"  status {pp['status']} — changes nothing")
 
+        print("\n== Listing quality — the catalogue's images,"
+              " measured and judged ==")
+        images_report = service.generate_product_images()
+        print(f"  images through the intake port:"
+              f" {images_report.accepted} accepted,"
+              f" {images_report.duplicates} duplicates,"
+              f" {images_report.refused} refused")
+        listing = service.diagnose_listing_quality()
+        lp = listing.payload
+        print(f"  listing {listing.artefact_id}  pack {lp['pack_version']}"
+              f"  verified {not service.listing.verify(listing)}")
+        for entry in lp["images"]:
+            if entry["image_fact_id"] is None:
+                print(f"  {entry['sku']} {entry['name']:<30} no image")
+            else:
+                print(f"  {entry['sku']} {entry['name']:<30}"
+                      f" {entry['format']}"
+                      f" {entry['width']}x{entry['height']}"
+                      f"  declared {entry['declared_class']}"
+                      f"  judged {entry['judged_class']}")
+        for finding in lp["findings"]:
+            if finding["class"] == "missing_image":
+                print(f"  MISSING {finding['sku']} {finding['name']}"
+                      f" — no listing image")
+            elif finding["class"] == "below_min_dimensions":
+                print(f"  SMALL {finding['sku']}"
+                      f" {finding['width']}x{finding['height']}"
+                      f" below minimums"
+                      f" {finding['min_width']}x{finding['min_height']}")
+            elif finding["class"] == "format_mismatch":
+                print(f"  FORMAT {finding['sku']}"
+                      f" filename claims {finding['declared_format']},"
+                      f" bytes measure {finding['format']}")
+            elif finding["class"] == "vision_mismatch":
+                print(f"  VISION {finding['sku']}"
+                      f" image shows {finding['judged_class']},"
+                      f" declared {finding['declared_class']}"
+                      f" — model-judged by"
+                      f" {finding['judgement_profile']}/"
+                      f"{finding['judgement_model']}")
+        print("  the deterministic checks are measured in code;"
+              " what an image shows is the model's judgement,"
+              " recorded as its own artefact")
+
         print("\n== Growth plan — assembled from the computed record ==")
         plan = service.assemble_plan()
         pp = plan.payload

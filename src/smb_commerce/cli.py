@@ -9,8 +9,10 @@ board-verify, connectors, quarantines, quarantine-verify,
 model-calls, model-profile, costs, contexts, subscriptions,
 subscribe, unsubscribe, digests, digest-generate, digest-verify.
 The
-diagnose commands cover all five diagnoses (stockout, ad decay,
-expense anomalies, refund anomalies, and the email-flow audit);
+diagnose commands cover all six diagnoses (stockout, ad decay,
+expense anomalies, refund anomalies, the email-flow audit, and
+listing quality — the catalogue's images, measured in code and
+judged through the governed port's vision shape);
 the plan commands assemble the growth plan from the computed
 record and re-verify it; the draft commands run the governed
 drafting pass over the plan and read its drafts and refusals;
@@ -61,6 +63,7 @@ from .access import (
 from .approvals import ACT_KINDS, ApprovalRefused
 from .diagnosis import DiagnosisRefused
 from .drafting import DRAFT_KINDS, DraftRefused
+from .listing import ListingRefused
 from .plan import PlanRefused
 from .service import CommerceService
 
@@ -89,6 +92,41 @@ def _print_ledger(service: CommerceService, caller: Caller) -> int:
 
 def _print_diagnosis(artefact) -> None:
     p = artefact.payload
+    if p["diagnosis"] == "listing_quality":
+        print(f"listing_quality {artefact.artefact_id}"
+              f" pack {p['pack_version']} as of {p['as_of']}")
+        for finding in p["findings"]:
+            if finding["class"] == "missing_image":
+                print(f"  MISSING {finding['sku']} {finding['name']}"
+                      f" — no listing image")
+            elif finding["class"] == "provenance_incomplete":
+                print(f"  PROVENANCE {finding['sku']}"
+                      f" fact {finding['fact_id']}"
+                      f" — provenance incomplete on the record")
+            elif finding["class"] == "hash_mismatch":
+                print(f"  HASH {finding['sku']}"
+                      f" fact {finding['fact_id']}"
+                      f" — stored bytes are not the recorded image")
+            elif finding["class"] == "below_min_dimensions":
+                print(f"  SMALL {finding['sku']}"
+                      f" {finding['width']}x{finding['height']}"
+                      f" below minimums"
+                      f" {finding['min_width']}x{finding['min_height']}")
+            elif finding["class"] == "format_mismatch":
+                print(f"  FORMAT {finding['sku']}"
+                      f" filename claims {finding['declared_format']},"
+                      f" bytes measure {finding['format']}")
+            elif finding["class"] == "vision_mismatch":
+                print(f"  VISION {finding['sku']}"
+                      f" image shows {finding['judged_class']},"
+                      f" declared {finding['declared_class']}"
+                      f" — model-judged by"
+                      f" {finding['judgement_profile']}/"
+                      f"{finding['judgement_model']}"
+                      f" (judgement {finding['judgement_artefact_id']})")
+        for entry in p["unjudged"]:
+            print(f"  UNJUDGED {entry['sku']} {entry['reason']}")
+        return
     print(f"{p['diagnosis']} {artefact.artefact_id} pack {p['pack_version']}"
           f" ledger {p['ledger_artefact_id']} as of {p['as_of']}")
     for finding in p["findings"]:
@@ -381,7 +419,8 @@ def main(argv: list[str] | None = None) -> int:
             _print_diagnosis(service.diagnose_expenses(caller))
             _print_diagnosis(service.diagnose_refunds(caller))
             _print_diagnosis(service.audit_email_flows(caller))
-        except DiagnosisRefused as refused:
+            _print_diagnosis(service.diagnose_listing_quality(caller))
+        except (DiagnosisRefused, ListingRefused) as refused:
             print(f"REFUSED {refused.refusal.artefact_id}"
                   f" {refused.refusal.payload['diagnosis']}:"
                   f" {', '.join(refused.refusal.payload['problems'])}")
@@ -405,6 +444,18 @@ def main(argv: list[str] | None = None) -> int:
             problems = service.diagnosis.verify(artefact)
             print(json.dumps({"artefact_id": artefact.artefact_id,
                               "verified": not problems, "problems": problems}))
+            status = status or (1 if problems else 0)
+        artefact = service.read_latest_artefact(
+            "diagnosis_listing_quality", caller)
+        if artefact is None:
+            print(json.dumps({"kind": "diagnosis_listing_quality",
+                              "verified": False, "problems": ["not_run"]}))
+            status = 1
+        else:
+            problems = service.listing.verify(artefact)
+            print(json.dumps({"artefact_id": artefact.artefact_id,
+                              "verified": not problems,
+                              "problems": problems}))
             status = status or (1 if problems else 0)
         return status
     if args.command == "refusals":

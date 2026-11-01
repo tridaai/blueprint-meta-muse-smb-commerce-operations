@@ -235,6 +235,24 @@ def verify_email_flow_audit(request: Request) -> dict:
         "diagnosis_email_flow_audit", _caller(request))
 
 
+@app.get("/diagnosis/listing-quality")
+def latest_listing_quality(request: Request) -> dict:
+    return _latest_diagnosis(
+        "diagnosis_listing_quality", _caller(request))
+
+
+@app.get("/diagnosis/listing-quality/verify")
+def verify_listing_quality(request: Request) -> dict:
+    service = get_service()
+    artefact = service.read_latest_artefact(
+        "diagnosis_listing_quality", _caller(request))
+    if artefact is None:
+        raise HTTPException(status_code=404, detail="no diagnosis run yet")
+    problems = service.listing.verify(artefact)
+    return {"artefact_id": artefact.artefact_id, "verified": not problems,
+            "problems": problems}
+
+
 @app.get("/diagnosis/flow-proposals")
 def list_flow_proposals(request: Request) -> dict:
     service = get_service()
