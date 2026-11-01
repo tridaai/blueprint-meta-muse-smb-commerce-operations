@@ -20,7 +20,8 @@ def test_api_health_readiness_and_reads(tmp_path, monkeypatch):
         api_module, "load_settings",
         lambda: settings,
     )
-    client = TestClient(api_module.app)
+    client = TestClient(api_module.app, headers={
+        "X-SMB-Actor": "Maya Chen", "X-SMB-Role": "owner"})
     assert client.get("/health").json() == {"status": "ok"}
     readiness = client.get("/readiness")
     assert readiness.status_code == 200

@@ -271,7 +271,8 @@ def test_connector_reads_on_the_api(tmp_path, monkeypatch):
     settings = make_settings(tmp_path)
     monkeypatch.setattr(api_module, "_service", None)
     monkeypatch.setattr(api_module, "load_settings", lambda: settings)
-    client = TestClient(api_module.app)
+    client = TestClient(api_module.app, headers={
+        "X-SMB-Actor": "Maya Chen", "X-SMB-Role": "owner"})
 
     registry = client.get("/connectors").json()
     assert registry["contract_version"] == CONTRACT_VERSION

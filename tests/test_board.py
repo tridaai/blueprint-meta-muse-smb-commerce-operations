@@ -309,7 +309,8 @@ def test_board_surfaces_api(tmp_path, monkeypatch):
     settings = make_settings(tmp_path)
     monkeypatch.setattr(api_module, "_service", None)
     monkeypatch.setattr(api_module, "load_settings", lambda: settings)
-    client = TestClient(api_module.app)
+    client = TestClient(api_module.app, headers={
+        "X-SMB-Actor": "Maya Chen", "X-SMB-Role": "owner"})
     assert client.get("/board").status_code == 404
     svc = api_module.get_service()
     svc.generate_dataset()

@@ -223,7 +223,8 @@ def test_api_diagnosis_reads(tmp_path, monkeypatch):
     settings = make_settings(tmp_path)
     monkeypatch.setattr(api_module, "_service", None)
     monkeypatch.setattr(api_module, "load_settings", lambda: settings)
-    client = TestClient(api_module.app)
+    client = TestClient(api_module.app, headers={
+        "X-SMB-Actor": "Maya Chen", "X-SMB-Role": "owner"})
     assert client.get("/diagnosis/stockout").status_code == 404
     service = api_module.get_service()
     service.generate_dataset()

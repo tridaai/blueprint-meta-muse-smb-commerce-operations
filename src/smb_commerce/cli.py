@@ -26,6 +26,15 @@ artefact's hash chain.
 Output is plain text sized for a terminal; figures come from
 the ledger artefact, never recomputed on the fly by the CLI
 itself.
+
+Round 13: the CLI resolves a caller identity exactly the way the
+API does — `--actor` plus `--role`, through the same
+`resolve_caller` — and passes it to the service, which enforces
+the access pack. With neither flag the CLI acts as the stated
+internal identity (the terminal operator running their own
+deployment); with flags, reads answer with the absent form for
+roles that may not see a resource class, and forbidden actions
+refuse. A partial or unstated identity fails closed.
 """
 
 from __future__ import annotations
@@ -34,6 +43,12 @@ import argparse
 import json
 import sys
 
+from .access import (
+    INTERNAL_CALLER,
+    AccessRefused,
+    Caller,
+    resolve_caller,
+)
 from .approvals import ACT_KINDS, ApprovalRefused
 from .diagnosis import DiagnosisRefused
 from .drafting import DRAFT_KINDS, DraftRefused
@@ -41,10 +56,11 @@ from .plan import PlanRefused
 from .service import CommerceService
 
 
-def _print_ledger(service: CommerceService) -> int:
-    artefact = service.store.latest_artefact("ledger")
+def _print_ledger(service: CommerceService, caller: Caller) -> int:
+    artefact = service.read_ledger(caller)
     if artefact is None:
-        artefact = service.ledger.compute()
+        print("no ledger computed yet")
+        return 1
     p = artefact.payload
     print(f"Ledger {artefact.artefact_id} as of {p['as_of']}")
     print(f"  gross revenue  {p['gross_revenue']:>12}")
@@ -195,8 +211,8 @@ def _print_verdict(verdict) -> None:
         print(f"  blocking: {', '.join(p['blocking_rules'])}")
 
 
-def _print_approval_queue(service: CommerceService) -> None:
-    queue = service.approval_queue()
+def _print_approval_queue(service: CommerceService, caller: Caller) -> None:
+    queue = service.approval_queue(caller)
     for entry in queue["awaiting_approval"]:
         print(f"AWAITING {entry['draft_kind']}"
               f" {entry['draft_artefact_id']}"
@@ -300,42 +316,63 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rejecter", default=None)
     parser.add_argument("--reason", default=None)
     parser.add_argument("--note", default="")
+    parser.add_argument("--actor", default=None)
+    parser.add_argument("--role", default=None)
     args = parser.parse_args(argv)
 
     service = CommerceService()
+    # The surface caller: the internal identity when no identity
+    # flags are given (the terminal operator), else the presented
+    # identity resolved the one shared way — a partial identity
+    # resolves to anonymous and fails closed.
+    if args.actor is None and args.role is None:
+        caller = INTERNAL_CALLER
+    else:
+        caller = resolve_caller(args.actor, args.role)
     if args.command == "generate":
-        report = service.generate_dataset()
+        try:
+            report = service.generate_dataset(caller)
+        except AccessRefused as refused:
+            print(f"REFUSED generate: {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
         print(f"accepted={report.accepted} duplicates={report.duplicates} "
               f"refused={report.refused}")
         return 0 if report.refused == 0 else 1
     if args.command == "facts":
-        facts = service.store.list_facts(args.kind)
+        facts = service.read_facts(args.kind, caller)
         for fact in facts:
             print(f"{fact.fact_id} {fact.kind} {fact.natural_key}"
                   f" src={fact.source_system} as_of={fact.as_of}")
         print(f"{len(facts)} facts")
         return 0
     if args.command == "ledger":
-        return _print_ledger(service)
+        return _print_ledger(service, caller)
     if args.command == "verify":
-        artefact = service.store.latest_artefact("ledger")
+        artefact = service.read_ledger(caller)
         if artefact is None:
-            artefact = service.ledger.compute()
+            print(json.dumps({"verified": False,
+                              "problems": ["no_ledger"]}))
+            return 1
         problems = service.ledger.verify(artefact)
         print(json.dumps({"artefact_id": artefact.artefact_id,
                           "verified": not problems, "problems": problems}))
         return 0 if not problems else 1
     if args.command == "diagnose":
         try:
-            _print_diagnosis(service.diagnose_stockout())
-            _print_diagnosis(service.diagnose_ad_decay())
-            _print_diagnosis(service.diagnose_expenses())
-            _print_diagnosis(service.diagnose_refunds())
-            _print_diagnosis(service.audit_email_flows())
+            _print_diagnosis(service.diagnose_stockout(caller))
+            _print_diagnosis(service.diagnose_ad_decay(caller))
+            _print_diagnosis(service.diagnose_expenses(caller))
+            _print_diagnosis(service.diagnose_refunds(caller))
+            _print_diagnosis(service.audit_email_flows(caller))
         except DiagnosisRefused as refused:
             print(f"REFUSED {refused.refusal.artefact_id}"
                   f" {refused.refusal.payload['diagnosis']}:"
                   f" {', '.join(refused.refusal.payload['problems'])}")
+            return 1
+        except AccessRefused as refused:
+            print(f"REFUSED diagnose: {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
             return 1
         return 0
     if args.command == "diagnose-verify":
@@ -343,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         for kind in ("diagnosis_stockout", "diagnosis_ad_decay",
                      "diagnosis_expense_anomaly", "diagnosis_refund_anomaly",
                      "diagnosis_email_flow_audit"):
-            artefact = service.store.latest_artefact(kind)
+            artefact = service.read_latest_artefact(kind, caller)
             if artefact is None:
                 print(json.dumps({"kind": kind, "verified": False,
                                   "problems": ["not_run"]}))
@@ -355,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
             status = status or (1 if problems else 0)
         return status
     if args.command == "refusals":
-        refusals = service.store.list_artefacts("diagnosis_refusal")
+        refusals = service.read_artefacts("diagnosis_refusal", caller)
         for refusal in refusals:
             print(f"{refusal.artefact_id} {refusal.payload['diagnosis']}"
                   f" pack {refusal.payload['pack_version']}:"
@@ -364,14 +401,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "plan":
         try:
-            _print_plan(service.assemble_plan())
+            _print_plan(service.assemble_plan(caller))
         except PlanRefused as refused:
             print(f"REFUSED {refused.refusal.artefact_id} growth_plan:"
                   f" {', '.join(refused.refusal.payload['problems'])}")
             return 1
+        except AccessRefused as refused:
+            print(f"REFUSED plan: {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
         return 0
     if args.command == "plan-verify":
-        artefact = service.store.latest_artefact("growth_plan")
+        artefact = service.read_latest_artefact("growth_plan", caller)
         if artefact is None:
             print(json.dumps({"kind": "growth_plan", "verified": False,
                               "problems": ["not_assembled"]}))
@@ -381,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
                           "verified": not problems, "problems": problems}))
         return 0 if not problems else 1
     if args.command == "plan-refusals":
-        refusals = service.store.list_artefacts("plan_refusal")
+        refusals = service.read_artefacts("plan_refusal", caller)
         for refusal in refusals:
             print(f"{refusal.artefact_id} growth_plan"
                   f" pack {refusal.payload['pack_version']}:"
@@ -390,11 +431,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "draft":
         try:
-            drafts = service.draft_all()
+            drafts = service.draft_all(caller)
         except DraftRefused as refused:
             print(f"REFUSED {refused.refusal.artefact_id}"
                   f" {refused.refusal.payload['draft_kind']}:"
                   f" {', '.join(refused.refusal.payload['problems'])}")
+            return 1
+        except AccessRefused as refused:
+            print(f"REFUSED draft: {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
             return 1
         for draft in drafts.values():
             _print_draft(draft)
@@ -402,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "drafts":
         count = 0
         for kind in DRAFT_KINDS:
-            for draft in service.store.list_artefacts(kind):
+            for draft in service.read_artefacts(kind, caller):
                 _print_draft(draft)
                 count += 1
         print(f"{count} drafts")
@@ -410,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "drafts-verify":
         status = 0
         for kind in DRAFT_KINDS:
-            artefact = service.store.latest_artefact(kind)
+            artefact = service.read_latest_artefact(kind, caller)
             if artefact is None:
                 print(json.dumps({"kind": kind, "verified": False,
                                   "problems": ["not_drafted"]}))
@@ -423,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
             status = status or (1 if problems else 0)
         return status
     if args.command == "draft-refusals":
-        refusals = service.store.list_artefacts("draft_refusal")
+        refusals = service.read_artefacts("draft_refusal", caller)
         for refusal in refusals:
             print(f"{refusal.artefact_id}"
                   f" {refusal.payload['draft_kind']}:"
@@ -431,12 +476,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(refusals)} draft refusals")
         return 0
     if args.command == "screen":
-        verdicts = service.screen_all()
+        try:
+            verdicts = service.screen_all(caller)
+        except AccessRefused as refused:
+            print(f"REFUSED screen: {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
         for verdict in verdicts.values():
             _print_verdict(verdict)
         return 0
     if args.command == "verdicts":
-        verdicts = service.store.list_artefacts("guardian_verdict")
+        verdicts = service.read_artefacts("guardian_verdict", caller)
         for verdict in verdicts:
             _print_verdict(verdict)
         print(f"{len(verdicts)} verdicts")
@@ -445,7 +495,7 @@ def main(argv: list[str] | None = None) -> int:
         status = 0
         seen: set[str] = set()
         for kind in DRAFT_KINDS:
-            for draft in service.store.list_artefacts(kind):
+            for draft in service.read_artefacts(kind, caller):
                 verdict = service.guardian.latest_verdict(
                     draft.artefact_id)
                 if verdict is None:
@@ -464,27 +514,33 @@ def main(argv: list[str] | None = None) -> int:
                 status = status or (1 if problems else 0)
         return status
     if args.command == "awaiting-approval":
-        awaiting = service.awaiting_approval()
+        awaiting = service.awaiting_approval(caller)
         for entry in awaiting:
             print(f"AWAITING {entry['draft_kind']}"
                   f" {entry['draft_artefact_id']}"
                   f" verdict {entry['verdict_artefact_id']}"
                   f" pack {entry['pack_version']}")
         print(f"{len(awaiting)} awaiting approval")
-        for entry in service.blocked_drafts():
+        for entry in service.blocked_drafts(caller):
             print(f"BLOCKED {entry['draft_kind']}"
                   f" {entry['draft_artefact_id']}"
                   f" rules {', '.join(entry['blocking_rules'])}")
         return 0
     if args.command == "queue":
-        _print_approval_queue(service)
+        _print_approval_queue(service, caller)
         return 0
     if args.command == "approve":
         if not args.draft or not args.approver:
             print("approve requires --draft and --approver")
             return 2
+        # The act's caller: the approver, acting in the role the
+        # --role flag states; without one, the internal identity.
+        act_caller = (
+            resolve_caller(args.approver, args.role)
+            if args.role is not None else INTERNAL_CALLER)
         try:
-            act = service.approve_draft(args.draft, args.approver)
+            act = service.approve_draft(
+                args.draft, args.approver, caller=act_caller)
         except ApprovalRefused as refused:
             print(f"REFUSED {refused.refusal.artefact_id} approve"
                   f" {args.draft}:"
@@ -500,9 +556,13 @@ def main(argv: list[str] | None = None) -> int:
         if not args.draft or not args.rejecter or not args.reason:
             print("reject requires --draft, --rejecter and --reason")
             return 2
+        act_caller = (
+            resolve_caller(args.rejecter, args.role)
+            if args.role is not None else INTERNAL_CALLER)
         try:
             act = service.reject_draft(
-                args.draft, args.rejecter, args.reason, args.note)
+                args.draft, args.rejecter, args.reason, args.note,
+                caller=act_caller)
         except ApprovalRefused as refused:
             print(f"REFUSED {refused.refusal.artefact_id} reject"
                   f" {args.draft}:"
@@ -518,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         status = 0
         count = 0
         for kind in ACT_KINDS:
-            for act in service.store.list_artefacts(kind):
+            for act in service.read_artefacts(kind, caller):
                 problems = service.approvals.verify(act)
                 print(json.dumps({"artefact_id": act.artefact_id,
                                   "verified": not problems,
@@ -534,7 +594,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.draft:
             print("approval-history requires --draft")
             return 2
-        for entry in service.approval_history(args.draft):
+        for entry in service.approval_history(args.draft, caller):
             payload = entry["payload"]
             if entry["kind"] == "approval_act":
                 stale = (" STALE moved:"
@@ -554,7 +614,7 @@ def main(argv: list[str] | None = None) -> int:
                       f" {', '.join(payload['problems'])}")
         return 0
     if args.command == "approval-refusals":
-        refusals = service.approvals.refusals()
+        refusals = service.approval_refusals(caller)
         for refusal in refusals:
             print(f"{refusal.artefact_id} {refusal.payload['action']}"
                   f" {refusal.payload['draft_artefact_id']}"
@@ -563,27 +623,38 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(refusals)} approval refusals")
         return 0
     if args.command == "board":
-        _print_board(service.derive_board())
+        try:
+            board = service.derive_board(caller)
+        except AccessRefused:
+            print("no board yet")
+            return 1
+        _print_board(board)
         return 0
     if args.command == "board-verify":
-        board = service.derive_board()
+        try:
+            board = service.derive_board(caller)
+        except AccessRefused:
+            print(json.dumps({"verified": False,
+                              "problems": ["no_board"]}))
+            return 1
         problems = service.board.verify(board)
         print(json.dumps({"artefact_id": board.artefact_id,
                           "verified": not problems, "problems": problems}))
         return 0 if not problems else 1
     if args.command == "connectors":
-        from .connectors import CONTRACTS, CONTRACT_VERSION
+        from .connectors import CONTRACT_VERSION
 
+        contracts = service.connector_registry(caller)
         print(f"contract version {CONTRACT_VERSION}")
-        for contract in CONTRACTS.values():
+        for contract in contracts:
             print(f"{contract.name} shape={contract.shape}"
                   f" source={contract.source_system}"
                   f" kinds={','.join(contract.kinds)}"
                   f" max_as_of_lag_days={contract.max_as_of_lag_days}")
-        print(f"{len(CONTRACTS)} contracts")
+        print(f"{len(contracts)} contracts")
         return 0
     if args.command == "quarantines":
-        quarantines = service.quarantines()
+        quarantines = service.quarantines(caller)
         for artefact in quarantines:
             payload = artefact.payload
             codes = ", ".join(
@@ -596,7 +667,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "quarantine-verify":
         status = 0
-        quarantines = service.quarantines()
+        quarantines = service.quarantines(caller)
         for artefact in quarantines:
             problems = service.verify_quarantine(artefact)
             print(json.dumps({"artefact_id": artefact.artefact_id,
@@ -609,7 +680,7 @@ def main(argv: list[str] | None = None) -> int:
             status = 1
         return status
     if args.command == "model-calls":
-        calls = service.store.list_model_calls(args.run_id)
+        calls = service.read_model_calls(args.run_id, caller)
         for call in calls:
             print(f"{call.call_id} run={call.run_id} profile={call.profile}"
                   f" tier={call.tier} in={call.input_tokens}"
@@ -617,7 +688,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(calls)} calls")
         return 0
     if args.command == "model-profile":
-        report = service.model_profile_report()
+        try:
+            report = service.model_profile_report(caller)
+        except AccessRefused as refused:
+            print(f"REFUSED model-profile: {', '.join(refused.problems)}"
+                  f" for {refused.caller.describe()}")
+            return 1
         for key in ("profile", "status", "model", "tier", "base_url",
                     "key_required", "key_present", "fail_closed",
                     "rate_card_version", "live_call_made"):
@@ -626,7 +702,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if report["status"] in (
             "ready", "configured_unverified") else 1
     if args.command == "costs":
-        summary = service.cost_summary()
+        summary = service.cost_summary(caller)
         total = summary["total"]
         print(f"rate card {summary['rate_card_version']}"
               f"  calls {total['calls']}"
@@ -645,7 +721,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"reconcile problems {problems}")
         return 0 if not problems else 1
     if args.command == "contexts":
-        records = service.context_records()
+        records = service.context_records(caller)
         for record in records:
             p = record.payload
             print(f"{record.artefact_id} run={p['run_id']}"

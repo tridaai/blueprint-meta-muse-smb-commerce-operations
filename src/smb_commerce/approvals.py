@@ -222,6 +222,14 @@ class ApprovalService:
 
     # -- the refusal record -------------------------------------------------
 
+    def record_refusal(self, action: str, draft_id: str, actor: str,
+                       problems: list[str]) -> Artefact:
+        """Record a refused attempt from outside the act flow —
+        the access layer's role gate (Round 13) refuses an
+        approval attempt before any draft lookup, and the refusal
+        is recorded here exactly like the flow's own refusals."""
+        return self._refuse(action, draft_id, actor, problems)
+
     def _refuse(self, action: str, draft_id: str, actor: str,
                 problems: list[str], extra: dict | None = None
                 ) -> Artefact:

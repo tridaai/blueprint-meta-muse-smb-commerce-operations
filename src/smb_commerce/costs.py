@@ -27,6 +27,10 @@ from .modelport import COST_PLACES, RATE_CARD_VERSION, call_cost
 from .store import SqlStore
 
 
+_GRAIN = ("per run — call records carry no timestamp,"
+          " so no by-day breakdown exists on the record")
+
+
 def _bucket() -> dict:
     return {"calls": 0, "input_tokens": 0, "output_tokens": 0,
             "_cost": Decimal("0")}
@@ -38,6 +42,24 @@ def _finish(bucket: dict) -> dict:
         "input_tokens": bucket["input_tokens"],
         "output_tokens": bucket["output_tokens"],
         "cost_usd": str(bucket["_cost"].quantize(COST_PLACES)),
+    }
+
+
+def empty_summary() -> dict:
+    """The summary of a cost record with nothing in it — the
+    exact shape :meth:`CostAnalytics.summary` returns over an
+    empty ledger. The access layer answers a caller who may not
+    read costs with this form: identical to an empty record, so
+    the totals of a real one do not leak."""
+    return {
+        "rate_card_version": RATE_CARD_VERSION,
+        "grain": _GRAIN,
+        "total": _finish(_bucket()),
+        "by_profile": {},
+        "by_tier": {},
+        "by_model": {},
+        "by_run": {},
+        "reconcile_problems": [],
     }
 
 
@@ -78,8 +100,7 @@ class CostAnalytics:
                 bucket["_cost"] += record.cost
         return {
             "rate_card_version": RATE_CARD_VERSION,
-            "grain": "per run — call records carry no timestamp,"
-                     " so no by-day breakdown exists on the record",
+            "grain": _GRAIN,
             "total": _finish(total),
             "by_profile": {k: _finish(v) for k, v in by_profile.items()},
             "by_tier": {k: _finish(v) for k, v in by_tier.items()},
