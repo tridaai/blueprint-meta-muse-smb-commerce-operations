@@ -185,6 +185,21 @@ Zero-tolerance counters:
                                    that the board shows as not
                                    stale, or a forged board showing
                                    it clean that verify() accepts
+  - quarantine_leakages .......... a record from a contract-
+                                   violating batch found in the
+                                   fact store, or a violating batch
+                                   that was not quarantined whole
+  - conformance_misses ........... a broken connector double
+                                   (missing provenance, unknown
+                                   contract version, mixed source,
+                                   stale as-of) whose batch was
+                                   accepted, whose violation was
+                                   not named, or a quarantine
+                                   artefact that does not verify
+  - exchange_replay_duplicates ... a replayed conforming batch
+                                   that stored anything twice, or
+                                   a replayed quarantined batch
+                                   that recorded a second artefact
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -206,6 +221,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from smb_commerce import generator
 from smb_commerce.approvals import ApprovalRefused
 from smb_commerce.config import Settings, load_settings
+from smb_commerce.connectors import CONTRACT_VERSION, ConnectorPort
 from smb_commerce.diagnosis import DIAGNOSIS_PACK
 from smb_commerce.drafting import DraftingService, DraftRefused
 from smb_commerce.ingest import IngestPort
@@ -247,6 +263,8 @@ def main() -> int:
         "board_figure_mismatches_accepted",
         "board_section_mismatches_accepted",
         "board_reperformance_mismatches", "board_stale_shown_clean",
+        "quarantine_leakages", "conformance_misses",
+        "exchange_replay_duplicates",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -1161,6 +1179,87 @@ def main() -> int:
         _expect_board_problem(
             pin_payload, "board_pin_mismatch:ledger_head",
             "board_section_mismatches_accepted")
+
+        # Connector ports v2 (Round 11): conformance and whole-batch
+        # quarantine on a probe store of the gate's own.
+        exchange_store = SqlStore.sqlite(
+            tmp_path / "exchange.db", base.migrations_dir)
+        exchange_port = ConnectorPort(
+            exchange_store, IngestPort(exchange_store))
+
+        def _probe_record(key, amount):
+            return {
+                "kind": "expense", "natural_key": key,
+                "payload": {"vendor": "Probe Co", "date": "2025-06-14",
+                            "category": "software", "amount": amount},
+                "source_system": "hartwell-books", "as_of": "2025-06-14",
+            }
+
+        def _probe_envelope(records):
+            return {
+                "contract": "books",
+                "contract_version": CONTRACT_VERSION,
+                "source_system": "hartwell-books",
+                # Just after the probe records (June 2025) — inside
+                # the books contract's stated lag bound.
+                "as_of": "2025-06-21",
+                "records": records,
+            }
+
+        good_batch = _probe_envelope([
+            _probe_record("expense:Probe Co:2025-06-14:10.00", "10.00"),
+            _probe_record("expense:Probe Co:2025-06-15:20.00", "20.00"),
+        ])
+        first = exchange_port.exchange(good_batch)
+        if first.status != "accepted" or first.accepted != 2:
+            counters["conformance_misses"] += 1
+        replay = exchange_port.exchange(copy.deepcopy(good_batch))
+        if (replay.status != "accepted" or replay.duplicates != 2
+                or exchange_store.count_facts() != 2):
+            counters["exchange_replay_duplicates"] += 1
+
+        def _expect_quarantine(envelope, code):
+            before = exchange_store.count_facts()
+            report = exchange_port.exchange(envelope)
+            if report.status != "quarantined":
+                counters["conformance_misses"] += 1
+                return None
+            if code not in {v.code for v in report.violations}:
+                counters["conformance_misses"] += 1
+            if exchange_store.count_facts() != before:
+                counters["quarantine_leakages"] += 1
+            return report
+
+        no_provenance = _probe_envelope([
+            _probe_record("expense:Probe Co:2025-06-16:30.00", "30.00"),
+            _probe_record("expense:Probe Co:2025-06-17:40.00", "40.00"),
+        ])
+        no_provenance["records"][1].pop("source_system")
+        quarantined = _expect_quarantine(
+            no_provenance, "missing_provenance")
+        if quarantined is not None:
+            again = exchange_port.exchange(copy.deepcopy(no_provenance))
+            if (again.quarantine.artefact_id
+                    != quarantined.quarantine.artefact_id
+                    or len(exchange_port.quarantines()) != 1):
+                counters["exchange_replay_duplicates"] += 1
+            counters["conformance_misses"] += len(
+                exchange_port.verify(quarantined.quarantine))
+
+        wrong_version = _probe_envelope(
+            [_probe_record("expense:Probe Co:2025-06-18:50.00", "50.00")])
+        wrong_version["contract_version"] = "1999.1.1"
+        _expect_quarantine(wrong_version, "unknown_contract_version")
+
+        mixed = _probe_envelope(
+            [_probe_record("expense:Probe Co:2025-06-19:60.00", "60.00")])
+        mixed["records"][0]["source_system"] = "hartwell-storefront"
+        _expect_quarantine(mixed, "mixed_source_batch")
+
+        stale = _probe_envelope(
+            [_probe_record("expense:Probe Co:2025-06-20:70.00", "70.00")])
+        stale["as_of"] = "2025-06-01"
+        _expect_quarantine(stale, "stale_as_of")
 
         # Cost ledger: an offline call and a stubbed hosted call, each
         # re-performed against the price table, each tier-stamped.
