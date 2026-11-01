@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from . import generator
+from .access import ACCESS_PACK_VERSION, Caller
 from .approvals import ApprovalRefused
 from .config import Settings, load_settings
 from .guardian import draft_content_hash
@@ -440,6 +441,41 @@ def main() -> int:
                   f" rules {', '.join(entry['blocking_rules'])}")
         print("  the board is re-derived from the record on every"
               " read — it stores nothing and edits nothing")
+
+        print("\n== Access control — the record answers to roles ==")
+        print(f"  access pack {ACCESS_PACK_VERSION}"
+              "  roles: owner, operator, bookkeeper, viewer")
+        narrative = drafts["plan_narrative"]
+        viewer = Caller("Vic Viewer", "viewer")
+        keeper = Caller("Bea Bookkeeper", "bookkeeper")
+        operator = Caller("Omar Operator", "operator")
+        probed = service.read_artefact(narrative.artefact_id, viewer)
+        absent = service.read_artefact("DRN-absent00000000000", viewer)
+        print(f"  viewer probes draft {narrative.artefact_id}:"
+              f" {'found' if probed else 'not found'}"
+              f" — a truly absent id answers identically:"
+              f" {'found' if absent else 'not found'}")
+        ledger_seen = service.read_latest_artefact("ledger", keeper)
+        draft_seen = service.read_artefact(narrative.artefact_id, keeper)
+        print(f"  bookkeeper reads the ledger:"
+              f" {'found' if ledger_seen else 'not found'}"
+              f"  and a draft:"
+              f" {'found' if draft_seen else 'not found'}")
+        # The operator runs the pipeline but cannot approve what
+        # it produced: the attempt is refused before any draft
+        # lookup, and the refusal is on the record.
+        try:
+            service.approve_draft(
+                drafts["ad_budget_note"].artefact_id, "Omar Operator",
+                caller=operator)
+            print("  operator approval: ACCEPTED — the gate failed")
+        except ApprovalRefused as refused:
+            print(f"  operator approval refused:"
+                  f" {refused.refusal.artefact_id}"
+                  f" {', '.join(refused.refusal.payload['problems'])}")
+        queue_after = service.approval_queue()
+        print(f"  the queue is unmoved: {len(queue_after['approved'])}"
+              " approved — the refused attempt recorded no act")
 
         print("\n== Model port (offline profile, governed) ==")
         reply = service.draft(
