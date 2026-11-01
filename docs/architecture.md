@@ -41,8 +41,9 @@ service enforces it the same way for all of them.
   idle-in-transaction locks cannot block a schema drop.
 - **Parity walk** (`parity.py`): the one definition of the core walk
   (ingest -> ledger -> diagnoses -> plan -> drafts -> guardian ->
-  approvals -> morning board) and of the canonical snapshot it is
-  graded by. The in-suite Postgres leg
+  approvals -> morning board; Round 14 extends it through
+  subscriptions and digest generation for both cadences) and of
+  the canonical snapshot it is graded by. The in-suite Postgres leg
   (`tests/test_postgres_parity.py`, gated on `SMB_TEST_DATABASE_URL`,
   test-database name guard, own throwaway schema) and the production
   smoke (`scripts/prod_smoke.py`, `make smoke`: fresh schema,
@@ -193,6 +194,39 @@ service enforces it the same way for all of them.
   presentation and resolve to the same `Caller`. In-process
   flows (demo, eval gate, graph, parity walk) pass no caller and
   act as `INTERNAL_CALLER`, the stated owner-operator identity.
+- **Digests** (`digests.py`, Round 14): subscriptions and the
+  stored counterpart of the morning board. A subscription is an
+  insert-only artefact naming a staff member (actor + role) and
+  a cadence (daily, or the seven-day week ending on a stated
+  date); unsubscribing supersedes it, and the current state is
+  the fold of the chain. Generation — gated `digests:generate`,
+  driven by the folded subscriptions — folds the board once and
+  stores, per active subscription, one digest artefact
+  assembled for that subscription's role: the sections included
+  are exactly the ones the access pack lets the role read
+  (headline `ledger:read`, findings + stock risks `plan:read`,
+  approvals `approvals:read`, costs `costs:read`), so the
+  bookkeeper's digest has no findings or approval picture and
+  the viewer's has no section at all. A digest pins the heads it
+  folded, cites every figure to its artefact, and is verified by
+  re-performance — fresh fold, figure re-resolution, pin and
+  section comparison — exactly as the board is; a digest folded
+  before the record moved fails verification like a stale
+  board. Digest identity is content, so two subscriptions for
+  the same role and cadence share the one artefact and
+  re-running a period inserts nothing. Reads are gated by
+  content at the service boundary: the caller must hold every
+  permission the digest's included sections required, on the
+  dedicated reads and on the generic artefact reads alike;
+  anything else answers as absent. Digests are purely
+  code-assembled (no model call, no narrative prose) and are
+  never sent anywhere — delivery would be leaving the building,
+  which Law 2 reserves to the guardian + approval path.
+  Surfaces: `/subscriptions`, `/digests/generate`, `/digests`,
+  `/digests/{id}`, `/digests/{id}/verify`; CLI `subscriptions`,
+  `subscribe`, `unsubscribe`, `digest-generate`, `digests`,
+  `digest-verify`; the parity walk generates both cadences, so
+  digests sit inside the byte-identical snapshot.
 - **Object store port** (`objectstore.py`): filesystem by default,
   S3-compatible adapter when `SMB_S3_ENDPOINT` is set; the adapter
   fails closed on incomplete configuration. Round 1 wires the port;
