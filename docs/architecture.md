@@ -57,6 +57,23 @@ Every surface — API, CLI, demo, graph — talks to one
   different content (`conflict`), and treats an identical re-present
   as an idempotent duplicate. Content hashes chain kind, key, payload,
   source and as-of.
+- **Connector ports v2** (`connectors.py`, Round 11): the batch layer
+  in front of the ingest port. Each source delivers under a versioned
+  exchange contract (`CONTRACTS`, version `2026.11.1`) stating its
+  envelope (contract, version, source system, as-of), the (kind,
+  source) pairs it accepts, and a per-contract as-of lag bound (the
+  books feed's monthly close states 45 days; the daily feeds state
+  7). `validate_batch` judges the whole envelope — provenance,
+  source purity, kind carriage, payload models (the ingest port's
+  own, so the layers cannot drift), as-of freshness — and names
+  every violation from a closed vocabulary. A violating batch is
+  quarantined whole: nothing is ingested, and a `connector_quarantine`
+  artefact records the contract, the violations, the records' digests
+  and the batch content hash (the artefact id is the hash's address;
+  `verify` re-derives the chain). A conforming batch is handed to the
+  ingest port unchanged, so duplicates and conflicts keep their v1
+  meaning and replays land nothing twice. The generator's dataset
+  loads as six contract batches (`generator.build_batches`).
 - **Generator** (`generator.py`): pure functions of stated constants —
   52 weeks from Monday 2025-01-06. Sales curves, refund rates (basis
   points of weekly units, floored), restock cycles, ad decay factor
