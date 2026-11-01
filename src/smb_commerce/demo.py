@@ -328,13 +328,42 @@ def main() -> int:
             if rule["outcome"] == "block":
                 print(f"    BLOCK {rule['rule_id']}:"
                       f" {'; '.join(rule['detail'][:2])}")
+        # A sneakier planted draft (Round 15): the same promise
+        # with the separators messed with — "guaran-teed"
+        # hyphenated, and the discount stated as "half price"
+        # with no percent anywhere. The screen reads phrases
+        # the way a reader receives them, and it still blocks.
+        sneaky_payload = dict(planted_payload)
+        sneaky_payload["content"] = {"steps": [
+            {"subject": "A treat, on us",
+             "body": "Everything is half price this week — "
+                     "results guaran-teed, every single week."},
+            {"subject": "Still thinking it over?",
+             "body": "Your favourites are waiting."},
+        ]}
+        sneaky = Artefact(
+            artefact_id="DCE-plantedsneaky0000001",
+            kind="draft_email_copy", payload=sneaky_payload,
+            input_fingerprint="planted-sneaky",
+        )
+        service.store.insert_artefact(sneaky)
+        sneaky_verdict = service.screen_draft(sneaky)
+        sv = sneaky_verdict.payload
+        print(f"  planted draft {sneaky.artefact_id}"
+              f" hash {draft_content_hash(sneaky)[:12]}..."
+              f" -> {sv['outcome']}")
+        for rule in sv["rules"]:
+            if rule["outcome"] == "block":
+                print(f"    BLOCK {rule['rule_id']}:"
+                      f" {'; '.join(rule['detail'][:2])}")
         awaiting = service.awaiting_approval()
         awaiting_ids = {e["draft_artefact_id"] for e in awaiting}
         print(f"  awaiting approval: {len(awaiting)} drafts"
               f" (screened and passing — approval itself is the"
               f" named human act below)")
-        print(f"  planted draft awaiting approval:"
-              f" {planted.artefact_id in awaiting_ids}"
+        print(f"  planted drafts awaiting approval:"
+              f" {planted.artefact_id in awaiting_ids},"
+              f" {sneaky.artefact_id in awaiting_ids}"
               f" — the gate holds")
 
         print("\n== Approval queue — the named human act ==")
