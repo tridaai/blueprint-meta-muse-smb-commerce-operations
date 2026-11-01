@@ -223,6 +223,33 @@ Zero-tolerance counters:
                                    that does not sum to the total,
                                    or a recorded cost the rate card
                                    cannot re-perform
+  - existence_leaks .............. a forbidden role reading a
+                                   real artefact, quarantine, fact
+                                   or verdict as if it could see
+                                   it — at the service layer (an
+                                   answer other than the absent
+                                   form) or the API layer (a
+                                   response to probing a real id
+                                   that differs by one byte from
+                                   probing an absent id) — or a
+                                   summary (queue fold, cost total,
+                                   board) showing a real figure to
+                                   a role that may not see it
+  - role_escalations ............. an action the pack refuses a
+                                   role — ingest, exchange,
+                                   diagnosis, plan, drafting or
+                                   screening by the bookkeeper or
+                                   the viewer, or an approval act
+                                   by any role but the owner —
+                                   that was accepted, or an
+                                   approval refusal that was not
+                                   recorded or did not name the
+                                   role problem
+  - unroled_actions_accepted ..... an anonymous caller (no actor,
+                                   no role) whose action was
+                                   accepted at the service layer
+                                   or the API layer, or whose cost
+                                   read showed a real total
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -244,6 +271,11 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from smb_commerce import generator
+from smb_commerce.access import (
+    ANONYMOUS,
+    AccessRefused,
+    Caller,
+)
 from smb_commerce.approvals import ApprovalRefused
 from smb_commerce.config import Settings, load_settings
 from smb_commerce.connectors import CONTRACT_VERSION, ConnectorPort
@@ -307,6 +339,8 @@ def main() -> int:
         "exchange_replay_duplicates",
         "profile_verification_failures", "context_budget_overruns",
         "unrecorded_compactions", "cost_reconcile_failures",
+        "existence_leaks", "role_escalations",
+        "unroled_actions_accepted",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -1435,6 +1469,177 @@ def main() -> int:
         second = assemble_context("sys", big_prompt, small_policy)
         if first.prompt != second.prompt or first.record() != second.record():
             counters["context_budget_overruns"] += 1
+
+        # Access control (Round 13): the pack over a fixture
+        # record of the gate's own — dataset, ledger, drafts,
+        # verdicts, one approval act, one quarantined batch.
+        # Existence hiding is graded at the service layer (a
+        # forbidden read returns the absent form) and at the API
+        # layer (probing a real id is byte-identical to probing
+        # an absent one); escalation is graded by attempting the
+        # refused actions and requiring the refusal — recorded,
+        # for approval acts.
+        from fastapi.testclient import TestClient
+
+        from smb_commerce import api as api_module
+
+        access_settings = Settings(
+            database_url="", sqlite_path=tmp_path / "access.db",
+            migrations_dir=base.migrations_dir,
+            object_dir=tmp_path / "access-objects",
+            s3_endpoint="", s3_bucket=base.s3_bucket,
+            model_profile="offline", model_tier="standard",
+            log_level="WARNING",
+        )
+        access_svc = CommerceService(access_settings)
+        access_svc.generate_dataset()
+        access_svc.ledger.compute()
+        access_drafts = access_svc.draft_all()
+        access_verdicts = access_svc.screen_all()
+        access_act = access_svc.approve_draft(
+            access_drafts["plan_narrative"].artefact_id, "Maya Chen")
+        access_broken = copy.deepcopy(generator.build_batches()[-1])
+        access_broken["contract_version"] = "1999.1.1"
+        access_quarantine = access_svc.exchange_batch(
+            access_broken).quarantine
+        access_fact_id = access_svc.store.list_facts()[0].fact_id
+        access_draft_id = (
+            access_drafts["winback_email_copy"].artefact_id)
+        access_verdict_id = access_verdicts[
+            access_draft_id].artefact_id
+
+        gate_owner = Caller("Maya Chen", "owner")
+        gate_operator = Caller("Omar Operator", "operator")
+        gate_bookkeeper = Caller("Bea Bookkeeper", "bookkeeper")
+        gate_viewer = Caller("Vic Viewer", "viewer")
+
+        for caller in (gate_bookkeeper, gate_viewer, ANONYMOUS):
+            for target in (access_draft_id, access_act.artefact_id,
+                           access_verdict_id):
+                if access_svc.read_artefact(target, caller) is not None:
+                    counters["existence_leaks"] += 1
+            if access_svc.approval_queue(caller) != {
+                    "awaiting_approval": [], "approved": [],
+                    "rejected": []}:
+                counters["existence_leaks"] += 1
+            if access_svc.approval_history(access_draft_id,
+                                            caller) != []:
+                counters["existence_leaks"] += 1
+        for caller in (gate_viewer, ANONYMOUS):
+            if access_svc.read_fact(access_fact_id, caller) is not None:
+                counters["existence_leaks"] += 1
+            if access_svc.read_quarantine(
+                    access_quarantine.artefact_id, caller) is not None:
+                counters["existence_leaks"] += 1
+            if access_svc.quarantines(caller) != []:
+                counters["existence_leaks"] += 1
+            if access_svc.cost_summary(
+                    caller)["total"]["calls"] != 0:
+                counters["existence_leaks"] += 1
+        # The permitted reads still read, and an absent id
+        # answers the owner with the same absence.
+        if access_svc.read_artefact(access_draft_id, gate_owner) is None:
+            counters["existence_leaks"] += 1
+        if access_svc.read_quarantine(
+                access_quarantine.artefact_id, gate_bookkeeper) is None:
+            counters["existence_leaks"] += 1
+        if access_svc.read_artefact(
+                "XXX-absent000000000", gate_owner) is not None:
+            counters["existence_leaks"] += 1
+
+        api_module._service = access_svc
+        gate_client = TestClient(api_module.app)
+
+        def _probe(template, real, caller):
+            headers = ({"X-SMB-Actor": caller.actor,
+                        "X-SMB-Role": caller.role}
+                       if caller.identified else {})
+            real_resp = gate_client.get(template.format(real),
+                                        headers=headers)
+            absent_resp = gate_client.get(
+                template.format("XXX-absent000000000"),
+                headers=headers)
+            if (real_resp.status_code != absent_resp.status_code
+                    or real_resp.content != absent_resp.content):
+                counters["existence_leaks"] += 1
+
+        for caller in (gate_viewer, ANONYMOUS):
+            _probe("/approvals/acts/{}", access_act.artefact_id, caller)
+            _probe("/connectors/quarantines/{}",
+                   access_quarantine.artefact_id, caller)
+            _probe("/guardian/verdicts/{}/verify",
+                   access_verdict_id, caller)
+            _probe("/facts/{}", access_fact_id, caller)
+        _probe("/approvals/acts/{}", access_act.artefact_id,
+               gate_bookkeeper)
+        board_resp = gate_client.get(
+            "/board", headers={"X-SMB-Actor": "Bea Bookkeeper",
+                               "X-SMB-Role": "bookkeeper"})
+        if board_resp.status_code != 404:
+            counters["existence_leaks"] += 1
+
+        conforming = generator.build_batches()[0]
+        for caller in (gate_bookkeeper, gate_viewer):
+            for attempt in (
+                lambda: access_svc.generate_dataset(caller),
+                lambda: access_svc.exchange_batch(conforming, caller),
+                lambda: access_svc.diagnose_stockout(caller),
+                lambda: access_svc.assemble_plan(caller),
+                lambda: access_svc.draft_all(caller),
+                lambda: access_svc.screen_all(caller),
+            ):
+                try:
+                    attempt()
+                    counters["role_escalations"] += 1
+                except AccessRefused:
+                    pass
+        for caller, role in ((gate_operator, "operator"),
+                             (gate_viewer, "viewer"),
+                             (gate_bookkeeper, "bookkeeper")):
+            refusals_before = len(access_svc.approvals.refusals())
+            try:
+                access_svc.approve_draft(
+                    access_draft_id, caller.actor, caller=caller)
+                counters["role_escalations"] += 1
+            except ApprovalRefused as refused_error:
+                if refused_error.refusal.payload["problems"] != [
+                        f"actor_role_may_not_approve:{role}"]:
+                    counters["role_escalations"] += 1
+            if len(access_svc.approvals.refusals()) <= refusals_before:
+                counters["role_escalations"] += 1
+            if access_svc.approvals.approval_for(
+                    access_draft_id) is not None:
+                counters["role_escalations"] += 1
+
+        # Unroled callers: anonymous at the service layer, and
+        # header-less at the API layer.
+        try:
+            access_svc.approve_draft(
+                access_draft_id, "Maya Chen", caller=ANONYMOUS)
+            counters["unroled_actions_accepted"] += 1
+        except ApprovalRefused as refused_error:
+            if refused_error.refusal.payload["problems"] != [
+                    "actor_role_may_not_approve:none"]:
+                counters["unroled_actions_accepted"] += 1
+        try:
+            access_svc.exchange_batch(conforming, ANONYMOUS)
+            counters["unroled_actions_accepted"] += 1
+        except AccessRefused:
+            pass
+        anon_approve = gate_client.post(
+            "/approvals/approve",
+            json={"draft_artefact_id": access_draft_id,
+                  "approver": "Maya Chen"})
+        if not (anon_approve.status_code == 422
+                and anon_approve.json()["detail"]["problems"]
+                == ["actor_role_may_not_approve:none"]):
+            counters["unroled_actions_accepted"] += 1
+        anon_exchange = gate_client.post(
+            "/connectors/exchange", json={"envelope": conforming})
+        if anon_exchange.status_code != 403:
+            counters["unroled_actions_accepted"] += 1
+        if gate_client.get("/costs").json()["total"]["calls"] != 0:
+            counters["unroled_actions_accepted"] += 1
 
         # Cost analytics (Round 12): the summary over the gate's
         # own ledger must equal a hand sum over the recorded
