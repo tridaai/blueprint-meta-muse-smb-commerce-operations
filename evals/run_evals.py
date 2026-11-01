@@ -200,6 +200,29 @@ Zero-tolerance counters:
                                    that stored anything twice, or
                                    a replayed quarantined batch
                                    that recorded a second artefact
+  - profile_verification_failures  the meta-muse profile not
+                                   failing closed without a key,
+                                   its report claiming a live call
+                                   or a verified model id, or the
+                                   stub probe's request shape, tier
+                                   stamp, graded cost identity or
+                                   reconciliation being wrong
+  - context_budget_overruns ...... an assembled context that
+                                   exceeded its policy budget, a
+                                   compaction that was not
+                                   deterministic, or a compacted
+                                   drafting context whose figures
+                                   no longer resolve to its sheet
+  - unrecorded_compactions ....... a governed call with no
+                                   context record, or a context
+                                   record whose arithmetic does not
+                                   re-perform
+  - cost_reconcile_failures ...... a cost-analytics total that
+                                   disagrees with a hand sum over
+                                   the recorded calls, a breakdown
+                                   that does not sum to the total,
+                                   or a recorded cost the rate card
+                                   cannot re-perform
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -210,11 +233,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import sys
 import tempfile
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -222,10 +247,25 @@ from smb_commerce import generator
 from smb_commerce.approvals import ApprovalRefused
 from smb_commerce.config import Settings, load_settings
 from smb_commerce.connectors import CONTRACT_VERSION, ConnectorPort
+from smb_commerce.context import (
+    CONTEXT_KIND,
+    ContextPolicy,
+    assemble_context,
+    verify_context_payload,
+)
+from smb_commerce.costs import CostAnalytics
 from smb_commerce.diagnosis import DIAGNOSIS_PACK
 from smb_commerce.drafting import DraftingService, DraftRefused
 from smb_commerce.ingest import IngestPort
-from smb_commerce.modelport import GovernedModelPort, ModelReply
+from smb_commerce.modelport import (
+    GovernedModelPort,
+    MetaMuseModelPort,
+    ModelReply,
+    OfflineModelPort,
+    ProfileNotConfigured,
+    probe_meta_muse,
+    profile_report,
+)
 from smb_commerce.models import Artefact
 from smb_commerce.plan import PlanRefused
 from smb_commerce.service import CommerceService
@@ -265,6 +305,8 @@ def main() -> int:
         "board_reperformance_mismatches", "board_stale_shown_clean",
         "quarantine_leakages", "conformance_misses",
         "exchange_replay_duplicates",
+        "profile_verification_failures", "context_budget_overruns",
+        "unrecorded_compactions", "cost_reconcile_failures",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -1269,6 +1311,150 @@ def main() -> int:
         for call in service.store.list_model_calls():
             if call.tier not in ("standard", "contributor"):
                 counters["tier_stamp_missing"] += 1
+
+        # Profile verification (Round 12): with no key in hand the
+        # hosted profile must fail closed and its report must say
+        # exactly that — unconfigured, model id an unverified
+        # default, no live call made. The environment is restored
+        # whatever happens.
+        saved_key = os.environ.pop("META_MODEL_API_KEY", None)
+        try:
+            try:
+                MetaMuseModelPort(tier="standard")
+                counters["profile_verification_failures"] += 1
+            except ProfileNotConfigured:
+                pass
+            muse_report = profile_report(SimpleNamespace(
+                model_profile="meta-muse", model_tier="standard"))
+            if not (muse_report["status"] == "not_configured"
+                    and muse_report["fail_closed"] is True
+                    and muse_report["key_present"] is False
+                    and muse_report["model_id_verified"] is False
+                    and muse_report["live_call_made"] is False):
+                counters["profile_verification_failures"] += 1
+        finally:
+            if saved_key is not None:
+                os.environ["META_MODEL_API_KEY"] = saved_key
+
+        # The stub probe: one governed hosted call against a local
+        # double, graded on request shape, tier stamp, the exact
+        # Standard identity (1M in / 1M out = $5.500000) and
+        # reconciliation.
+        probe_store = SqlStore.sqlite(
+            tmp_path / "probe12.db", base.migrations_dir)
+        shape: dict = {}
+
+        def _probe_double(url, headers, body):
+            shape["url_ok"] = (
+                url == "https://api.meta.ai/v1/chat/completions")
+            shape["auth_ok"] = (
+                headers.get("Authorization") == "Bearer eval-key")
+            shape["roles"] = [m["role"] for m in body.get("messages", [])]
+            shape["model"] = body.get("model")
+            return {
+                "choices": [{"message": {"content": "ready"}}],
+                "usage": {"prompt_tokens": 1_000_000,
+                          "completion_tokens": 1_000_000},
+            }
+
+        probe = probe_meta_muse(
+            probe_store, api_key="eval-key", transport=_probe_double)
+        if not (shape.get("url_ok") and shape.get("auth_ok")
+                and shape.get("roles") == ["system", "user"]
+                and shape.get("model") == "muse-spark"):
+            counters["profile_verification_failures"] += 1
+        if not (probe["cost_usd"] == "5.500000"
+                and probe["tier"] == "standard"
+                and probe["calls_recorded"] == 1
+                and probe["reconcile_problems"] == []
+                and probe["live_call_made"] is False):
+            counters["profile_verification_failures"] += 1
+
+        # Context discipline (Round 12): every governed call on
+        # the gate's own store left exactly one context record,
+        # inside its budget and re-performing clean.
+        all_calls = service.store.list_model_calls()
+        records = service.store.list_artefacts(CONTEXT_KIND)
+        if len(records) != len(all_calls):
+            counters["unrecorded_compactions"] += abs(
+                len(records) - len(all_calls))
+        recorded_ids = {r.payload["call_id"] for r in records}
+        for call in all_calls:
+            if call.call_id not in recorded_ids:
+                counters["unrecorded_compactions"] += 1
+        for record in records:
+            counters["unrecorded_compactions"] += len(
+                verify_context_payload(record.payload))
+            if (record.payload["tokens_after"]
+                    > record.payload["budget_tokens"]):
+                counters["context_budget_overruns"] += 1
+
+        # A synthetic oversized drafting context through the
+        # governed port under a small policy: compaction must be
+        # recorded, inside the small budget, deterministic, and
+        # the draft must still resolve to the sheet's figures —
+        # the sheet is pinned, so compaction cannot move a figure.
+        small_policy = ContextPolicy(
+            window_tokens=120, output_reserve_tokens=20)
+        eval_sheet = {
+            "draft_kind": "plan_narrative",
+            "business": "Hartwell Home Goods",
+            "as_of": "2026-01-04",
+            "summary": [], "priorities": [], "coverage": [],
+            "claims": [{"value": "100.00",
+                        "source_artefact_id": "LED-x",
+                        "source_field": "net_revenue"}],
+        }
+        big_prompt = "\n".join(
+            ["DRAFT-REQUEST plan_narrative",
+             f"FIGURE-SHEET {json.dumps(eval_sheet, sort_keys=True)}"]
+            + ["narrative line carries ten plain words of context here"
+               for _ in range(30)])
+        big_port = GovernedModelPort(
+            OfflineModelPort(tier="standard"), probe_store,
+            context_policy=small_policy)
+        big_reply = big_port.complete("eval-context", "sys", big_prompt)
+        try:
+            claims_ok = (json.loads(big_reply.text)["claims"]
+                         == eval_sheet["claims"])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            claims_ok = False
+        if not claims_ok:
+            counters["context_budget_overruns"] += 1
+        (context_record,) = [
+            r for r in probe_store.list_artefacts(CONTEXT_KIND)
+            if r.payload["run_id"] == "eval-context"
+        ]
+        if (not context_record.payload["compacted"]
+                or context_record.payload["tokens_after"]
+                > small_policy.budget_tokens):
+            counters["context_budget_overruns"] += 1
+        counters["unrecorded_compactions"] += len(
+            verify_context_payload(context_record.payload, small_policy))
+        first = assemble_context("sys", big_prompt, small_policy)
+        second = assemble_context("sys", big_prompt, small_policy)
+        if first.prompt != second.prompt or first.record() != second.record():
+            counters["context_budget_overruns"] += 1
+
+        # Cost analytics (Round 12): the summary over the gate's
+        # own ledger must equal a hand sum over the recorded
+        # calls, every breakdown must sum to the total, and the
+        # global reconciliation must be clean.
+        analytics = CostAnalytics(service.store)
+        summary = analytics.summary()
+        hand_total = sum((c.cost for c in all_calls), Decimal("0"))
+        if Decimal(summary["total"]["cost_usd"]) != hand_total:
+            counters["cost_reconcile_failures"] += 1
+        if summary["total"]["calls"] != len(all_calls):
+            counters["cost_reconcile_failures"] += 1
+        for breakdown in ("by_profile", "by_tier", "by_model", "by_run"):
+            if sum(
+                Decimal(bucket["cost_usd"])
+                for bucket in summary[breakdown].values()
+            ) != hand_total:
+                counters["cost_reconcile_failures"] += 1
+        counters["cost_reconcile_failures"] += len(
+            analytics.reconcile_all())
 
     failed = False
     for name, value in counters.items():
