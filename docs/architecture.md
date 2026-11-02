@@ -505,6 +505,33 @@ service enforces it the same way for all of them.
   its cited artefact, the pins compared against the current
   heads — so a forged, tampered or simply out-of-date board
   fails verification with the section or figure named.
+- **Eval gate** (`evals/run_evals.py`): the release gate, a
+  single deterministic offline walk over fixture services that
+  ends in required-zero counters. Round 19 deepened it in
+  three ways. Boundary grading: fixtures at every pack
+  threshold and one step to each side, judged with the pack's
+  own semantics — the stockout bar and decay factor are
+  inclusive, the refund bar, outlier multiple and new-vendor
+  bar strict, the duplicate window inclusive, the guardian cap
+  blocks only above it, and the same at-the-bar discipline at
+  the money magnitude edge, the context budget, the token
+  expiry instant and TTL bounds, the books contract's 45-day
+  as-of lag, and the digest period shapes. A tamper sweep: one
+  figure or field altered per artefact family — 22 families,
+  the webhook delivery tampered behind the store's back — with
+  the family's verifier required to refuse it by name; the
+  export artefact's month label was examined and deliberately
+  excluded, because the export document's authority is its
+  checksum, which is swept. And promotions: invariants the
+  laws rest on that only the test suite asserted (ingest
+  idempotence and conflict refusal, the webhook retry bound,
+  both unsubscribe folds, the pinned-over-budget context
+  failure) now stand as counters in the gate itself, alongside
+  a contract-violating batch graded at the API surface. The
+  gate runs on the local profile; Postgres parity is the
+  suite's parity leg and the prod smoke's work, and no live
+  model behaviour is graded — the hosted profile's live leg
+  remains pending a key.
 
 ## Data model
 
