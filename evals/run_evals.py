@@ -358,6 +358,76 @@ Zero-tolerance counters:
                                    verifying signature, or a
                                    recorded delivery whose
                                    signature does not re-perform
+  - boundary_grading_misses ...... a pack threshold graded at
+                                   its bar and one step to each
+                                   side that landed on the wrong
+                                   side of the pack's own stated
+                                   semantics (Round 19): stockout
+                                   cover at 23.90 / 24.00 / 24.10
+                                   days, decay factor at 0.4995 /
+                                   0.5000 / 0.5005 with spend and
+                                   history at their floors, refund
+                                   rate at 0.040000 / 0.040001
+                                   with volume at its floor,
+                                   duplicate gap at 7 / 8 days,
+                                   outlier multiple at exactly
+                                   3.00x and a cent over, the
+                                   new-vendor threshold at
+                                   1000.00 / 1000.01, the guardian
+                                   cap at a word-form 25 and a
+                                   word-form quarter against 26,
+                                   the money magnitude the port
+                                   can carry and one digit
+                                   beyond it, context assembly at
+                                   exactly the budget and one
+                                   word over, a token at one
+                                   second before its expiry
+                                   instant and at it (with TTL
+                                   issuance at both bounds), the
+                                   books contract lag at 45 / 46
+                                   days, and the daily / weekly
+                                   digest periods at the head
+                                   ledger's as-of
+  - tamper_sweep_misses .......... an artefact family whose
+                                   verifier accepted a copy with
+                                   one figure or field altered
+                                   (Round 19's systematic sweep:
+                                   ledger, the six diagnosis
+                                   kinds, the flow proposal, the
+                                   plan, the three draft kinds,
+                                   verdict, approval act, board,
+                                   quarantine, context record,
+                                   digest, review pack, its
+                                   export and its publication
+                                   act, and the webhook delivery
+                                   — per-family results print
+                                   above the counter summary)
+  - ingest_idempotence_failures .. an identical fact
+                                   re-presented at the ingest
+                                   port that landed twice or was
+                                   not answered as a duplicate,
+                                   or a natural key re-presented
+                                   with different content that
+                                   was not refused as a conflict
+                                   (promoted from the test suite,
+                                   Round 19)
+  - webhook_retry_overruns ....... a delivery under a failing
+                                   receiver that did not rest at
+                                   the stated bound of three
+                                   recorded attempts, or a firing
+                                   operation that failed with its
+                                   delivery (promoted from the
+                                   test suite, Round 19)
+  - unsubscribed_deliveries_made . a delivery recorded for a
+                                   webhook subscription after
+                                   it was unsubscribed (promoted
+                                   from the test suite, Round 19)
+  - unsubscribed_digests_generated a digest generated for a
+                                   digest subscription that had
+                                   been unsubscribed, or a
+                                   resubscription that did not
+                                   revive generation (promoted
+                                   from the test suite, Round 19)
 
 Prints one line per counter and a final GATE: PASS or GATE: FAIL.
 Exit code 0 on PASS, 1 on FAIL.
@@ -389,6 +459,7 @@ from smb_commerce.config import Settings, load_settings
 from smb_commerce.connectors import CONTRACT_VERSION, ConnectorPort
 from smb_commerce.context import (
     CONTEXT_KIND,
+    ContextOverBudget,
     ContextPolicy,
     assemble_context,
     verify_context_payload,
@@ -469,6 +540,10 @@ def main() -> int:
         "token_plaintext_leaks",
         "webhook_payload_figure_leaks",
         "unsigned_deliveries_accepted",
+        "boundary_grading_misses", "tamper_sweep_misses",
+        "ingest_idempotence_failures", "webhook_retry_overruns",
+        "unsubscribed_deliveries_made",
+        "unsubscribed_digests_generated",
     )}
     with tempfile.TemporaryDirectory(prefix="smb-commerce-evals-") as tmp:
         tmp_path = Path(tmp)
@@ -2230,6 +2305,592 @@ def main() -> int:
                     receiver.accepted[0],
                     {"X-SMB-Signature": "sha256=" + "0" * 64}) != 401:
                 counters["unsigned_deliveries_accepted"] += 1
+
+        # Eval depth (Round 19): boundary grading, a systematic
+        # tamper sweep, and law-grade invariants promoted from
+        # the test suite into the gate. Boundaries are graded
+        # at the bar and one step to each side, against each
+        # pack's own stated semantics — inclusive or strict,
+        # as its code states; a step landing on the wrong side
+        # is a boundary_grading_miss.
+        from smb_commerce.tokens import MAX_TTL_SECONDS
+
+        def _r19_service(name):
+            fixture_cfg = Settings(
+                database_url="", sqlite_path=tmp_path / f"{name}.db",
+                migrations_dir=base.migrations_dir,
+                object_dir=tmp_path / f"{name}-objects",
+                s3_endpoint="", s3_bucket=base.s3_bucket,
+                model_profile="offline", model_tier="standard",
+                log_level="WARNING",
+            )
+            return CommerceService(fixture_cfg)
+
+        # Stockout: cover at 23.90 / 24.00 / 24.10 days against
+        # the pack's inclusive 24.00 bar. 280 trailing units is
+        # a 10.00/day velocity, so on-hand 239 / 240 / 241
+        # lands the three covers exactly.
+        bnd_stock = _r19_service("boundary-stockout")
+        bnd_stock_items = []
+        for sku, price, on_hand in (
+                ("HW-THR-002", "64.00", 240),
+                ("HW-CAN-003", "38.00", 241),
+                ("HW-DIN-001", "92.00", 239)):
+            bnd_stock_items += [
+                {"kind": "order",
+                 "natural_key": f"order:{sku}:2025-12-20",
+                 "payload": {"order_id": f"B-{sku[-3:]}",
+                             "sku": sku, "date": "2025-12-20",
+                             "qty": 280, "unit_price": price,
+                             "amount": str(Decimal(price) * 280)},
+                 "source_system": generator.SOURCE_ORDERS,
+                 "as_of": "2025-12-20"},
+                {"kind": "inventory",
+                 "natural_key": f"inventory:{sku}:2025-12-29",
+                 "payload": {"sku": sku, "week_start": "2025-12-29",
+                             "on_hand": on_hand},
+                 "source_system": generator.SOURCE_INVENTORY,
+                 "as_of": "2025-12-29"},
+            ]
+        bnd_stock.ingest.ingest_many(bnd_stock_items)
+        bnd_stock.ledger.compute()
+        bnd_so = bnd_stock.diagnose_stockout()
+        counters["boundary_grading_misses"] += len(
+            bnd_stock.diagnosis.verify(bnd_so))
+        bnd_so_named = {f["sku"]: f["cover_days"]
+                        for f in bnd_so.payload["findings"]}
+        if bnd_so_named != {"HW-THR-002": "24.00",
+                            "HW-DIN-001": "23.90"}:
+            counters["boundary_grading_misses"] += 1
+
+        # Ad decay: the factor at 0.4995 / 0.5000 / 0.5005
+        # against the inclusive 0.5000 flag bar; total spend
+        # at exactly 2600.00 (judged) and 2599.92 (unjudged);
+        # eight weeks of history (judged) and seven
+        # (unjudged). One ad_daily fact per Monday carries
+        # the week's spend and revenue.
+        bnd_decay = _r19_service("boundary-decay")
+        mondays = [date(2025, 11, 10) + timedelta(days=7 * i)
+                   for i in range(8)]
+        decay_items = []
+        for ad_set, spend, first_rev, latest_rev, weeks in (
+                ("AD-BAR", "500.00", "2000.00", "1000.00", 8),
+                ("AD-OVER", "500.00", "2000.00", "1001.00", 8),
+                ("AD-UNDER", "500.00", "2000.00", "999.00", 8),
+                ("AD-FLOOR", "325.00", "1300.00", "100.00", 8),
+                ("AD-THIN", "324.99", "1300.00", "100.00", 8),
+                ("AD-SHORT", "500.00", "2000.00", "100.00", 7)):
+            for i, monday in enumerate(mondays[:weeks]):
+                revenue = (first_rev if i == 0 else
+                           latest_rev if i == weeks - 1 else
+                           str(Decimal(spend) * 3))
+                decay_items.append({
+                    "kind": "ad_daily",
+                    "natural_key": f"ad:{ad_set}:{monday.isoformat()}",
+                    "payload": {"ad_set": ad_set,
+                                "date": monday.isoformat(),
+                                "spend": spend,
+                                "attributed_revenue": revenue},
+                    "source_system": generator.SOURCE_ADS,
+                    "as_of": monday.isoformat()})
+        bnd_decay.ingest.ingest_many(decay_items)
+        bnd_decay.ledger.compute()
+        bnd_ad = bnd_decay.diagnose_ad_decay()
+        counters["boundary_grading_misses"] += len(
+            bnd_decay.diagnosis.verify(bnd_ad))
+        bnd_ad_named = {f["ad_set"]: f["decay_factor"]
+                        for f in bnd_ad.payload["findings"]}
+        if bnd_ad_named != {"AD-BAR": "0.5000",
+                            "AD-UNDER": "0.4995",
+                            "AD-FLOOR": "0.0769"}:
+            counters["boundary_grading_misses"] += 1
+        bnd_ad_unjudged = {e["ad_set"]: e["reason"]
+                           for e in bnd_ad.payload["unjudged"]}
+        if bnd_ad_unjudged != {"AD-THIN": "below_min_spend",
+                               "AD-SHORT": "insufficient_history"}:
+            counters["boundary_grading_misses"] += 1
+
+        # Refunds: the rate at exactly 0.040000 (the pack's
+        # bar is strict — not flagged) and at 0.040001
+        # (flagged); units sold at 999, under the 1000 floor
+        # (unjudged), against the two judged SKUs at 1000.
+        bnd_ref = _r19_service("boundary-refunds")
+        ref_items = []
+        for sku, qty, refund_amount in (
+                ("HW-VAS-004", 1000, "400.00"),
+                ("HW-DIN-001", 1000, "400.01"),
+                ("HW-CAN-003", 999, "500.00")):
+            ref_items += [
+                {"kind": "order",
+                 "natural_key": f"order:{sku}:2025-12-20",
+                 "payload": {"order_id": f"B-{sku[-3:]}",
+                             "sku": sku, "date": "2025-12-20",
+                             "qty": qty, "unit_price": "10.00",
+                             "amount": str(Decimal("10.00") * qty)},
+                 "source_system": generator.SOURCE_ORDERS,
+                 "as_of": "2025-12-20"},
+                {"kind": "refund",
+                 "natural_key": f"refund:{sku}:2025-12-29",
+                 "payload": {"sku": sku, "week_start": "2025-12-29",
+                             "qty": 40, "amount": refund_amount},
+                 "source_system": generator.SOURCE_ORDERS,
+                 "as_of": "2025-12-29"},
+            ]
+        bnd_ref.ingest.ingest_many(ref_items)
+        bnd_ref.ledger.compute()
+        bnd_rf = bnd_ref.diagnose_refunds()
+        counters["boundary_grading_misses"] += len(
+            bnd_ref.diagnosis.verify(bnd_rf))
+        if {f["sku"] for f in bnd_rf.payload["findings"]} != {
+                "HW-DIN-001"}:
+            counters["boundary_grading_misses"] += 1
+        # The floor itself: the 999-unit SKU is unjudged for
+        # volume, and the at-bar SKU was judged — it is in
+        # neither the findings nor the unjudged (the ledger
+        # also carries catalogue SKUs with no sales at all,
+        # which stand unjudged on any record).
+        bnd_rf_unjudged = {e["sku"]: e["reason"]
+                           for e in bnd_rf.payload["unjudged"]}
+        if (bnd_rf_unjudged.get("HW-CAN-003") != "below_min_volume"
+                or "HW-VAS-004" in bnd_rf_unjudged):
+            counters["boundary_grading_misses"] += 1
+
+        # Expenses: the duplicate gap at 7 days (a duplicate)
+        # and 8 (none); the outlier multiple at exactly 3.00x
+        # the median (strict — not flagged) and a cent over;
+        # the new-vendor threshold at 1000.00 (not
+        # informational) and 1000.01.
+        bnd_exp = _r19_service("boundary-expenses")
+        exp_items = []
+
+        def _charge(vendor, day, amount):
+            exp_items.append({
+                "kind": "expense",
+                "natural_key": f"expense:{vendor}:{day}:{amount}",
+                "payload": {"vendor": vendor, "date": day,
+                            "category": "ops", "amount": amount},
+                "source_system": generator.SOURCE_FINANCE,
+                "as_of": day})
+
+        _charge("GapSeven Co", "2026-01-01", "200.00")
+        _charge("GapSeven Co", "2026-01-08", "200.00")
+        _charge("GapEight Co", "2026-01-01", "200.00")
+        _charge("GapEight Co", "2026-01-09", "200.00")
+        for vendor, big in (("Exact Co", "300.00"),
+                            ("Over Co", "300.01")):
+            for day in ("2025-01-05", "2025-02-05", "2025-03-05"):
+                _charge(vendor, day, "100.00")
+            _charge(vendor, "2025-04-05", big)
+        _charge("NewExact Co", "2025-05-05", "1000.00")
+        _charge("NewOver Co", "2025-05-06", "1000.01")
+        bnd_exp.ingest.ingest_many(exp_items)
+        bnd_exp.ledger.compute()
+        bnd_ex = bnd_exp.diagnose_expenses()
+        counters["boundary_grading_misses"] += len(
+            bnd_exp.diagnosis.verify(bnd_ex))
+        bnd_dups = {(f["vendor"], f["amount"], tuple(f["dates"]))
+                    for f in bnd_ex.payload["findings"]
+                    if f["class"] == "duplicate_charge"}
+        if bnd_dups != {("GapSeven Co", "200.00",
+                         ("2026-01-01", "2026-01-08"))}:
+            counters["boundary_grading_misses"] += 1
+        bnd_outliers = {(f["vendor"], f["amount"])
+                        for f in bnd_ex.payload["findings"]
+                        if f["class"] == "amount_outlier"}
+        if bnd_outliers != {("Over Co", "300.01")}:
+            counters["boundary_grading_misses"] += 1
+        bnd_info = {(e["vendor"], e["amount"])
+                    for e in bnd_ex.payload["informational"]}
+        if bnd_info != {("NewOver Co", "1000.01")}:
+            counters["boundary_grading_misses"] += 1
+
+        # Guardian cap: a word-form promise at the 25% cap
+        # (the pack blocks only beyond it), a word-form
+        # quarter (25 by the pack's own word table), and one
+        # percent over — graded on the blocking rules of real
+        # verdicts over the red-team fixture's store.
+        for model_name, prose, expect_blocked in (
+            ("r19-cap-at", "Take twenty-five percent off the"
+             " decaying set's next flight, whenever you are"
+             " ready.", False),
+            ("r19-cap-word", "Take a quarter off the decaying"
+             " set's next flight, whenever you are ready.", False),
+            ("r19-cap-over", "Take twenty-six percent off the"
+             " decaying set's next flight, whenever you are"
+             " ready.", True),
+        ):
+            cap_draft = DraftingService(
+                rt.store,
+                GovernedModelPort(
+                    ProsePort(model_name, prose), rt.store),
+            ).draft_ad_note()
+            cap_verdict = rt.screen_draft(cap_draft)
+            if ("discount_beyond_cap"
+                    in cap_verdict.payload["blocking_rules"]
+                    ) != expect_blocked:
+                counters["boundary_grading_misses"] += 1
+
+        # Money: the port carries the largest cent-quantisable
+        # magnitude and refuses one digit beyond it. (The
+        # MoneyStr rule is a magnitude bound: a sub-cent
+        # string quantises without raising and is carried as
+        # written, exactly as its docstring states.)
+        bnd_store = SqlStore.sqlite(
+            tmp_path / "boundary-money.db", base.migrations_dir)
+        bnd_port = IngestPort(bnd_store)
+        big_ok = bnd_port.ingest(
+            kind="expense", natural_key="boundary:big-ok",
+            payload={"vendor": "Boundary Co", "date": "2026-01-02",
+                     "category": "ops",
+                     "amount": "99999999999999999999999999.99"},
+            source_system="hartwell-books", as_of="2026-01-02")
+        if big_ok.status != "accepted":
+            counters["boundary_grading_misses"] += 1
+        big_over = bnd_port.ingest(
+            kind="expense", natural_key="boundary:big-over",
+            payload={"vendor": "Boundary Co", "date": "2026-01-02",
+                     "category": "ops",
+                     "amount": "999999999999999999999999999.99"},
+            source_system="hartwell-books", as_of="2026-01-02")
+        if (big_over.status != "refused"
+                or big_over.reason != "invalid_payload"):
+            counters["boundary_grading_misses"] += 1
+
+        # Context: assembly at exactly the budget fits whole
+        # — no compaction, and the record re-performs. One
+        # word over compacts, records the drop, and lands
+        # inside the budget. Pinned material alone over the
+        # budget fails closed (promoted from the test suite):
+        # assembly refuses, so the call is never made.
+        policy19 = ContextPolicy(
+            window_tokens=120, output_reserve_tokens=20)
+        exact_fit = assemble_context(
+            "sys", " ".join(["word"] * 99), policy19)
+        if (exact_fit.compacted or exact_fit.tokens_after != 100
+                or verify_context_payload(
+                    exact_fit.record(), policy19)):
+            counters["boundary_grading_misses"] += 1
+        one_over = assemble_context(
+            "sys", " ".join(["word"] * 100), policy19)
+        if (not one_over.compacted or one_over.tokens_after > 100
+                or not one_over.dropped
+                or verify_context_payload(
+                    one_over.record(), policy19)):
+            counters["boundary_grading_misses"] += 1
+        pad_sheet = {"claims": [{
+            "value": "1.00", "source_artefact_id": "LED-x",
+            "source_field": "net_revenue",
+            "pad": " ".join(["pad"] * 150)}]}
+        try:
+            assemble_context(
+                "sys",
+                "DRAFT-REQUEST plan_narrative\nFIGURE-SHEET "
+                + json.dumps(pad_sheet, sort_keys=True),
+                policy19)
+            counters["context_budget_overruns"] += 1
+        except ContextOverBudget:
+            pass
+
+        # Tokens: the expiry boundary is the stated instant —
+        # one second before it the bearer is identified, at
+        # it the token stands expired (status derivation is
+        # >=, as tokens.py states). TTL issuance is bounded
+        # on both sides: zero and one past the maximum are
+        # refused, the maximum itself issues.
+        bnd_token = service.issue_token(
+            "Boundary Op", "operator", ["facts:read"],
+            at="2026-01-01T00:00:00+00:00", ttl_seconds=60)
+        if not service.authenticate_token(
+                bnd_token.bearer,
+                at="2026-01-01T00:00:59+00:00").identified:
+            counters["boundary_grading_misses"] += 1
+        if service.authenticate_token(
+                bnd_token.bearer,
+                at="2026-01-01T00:01:00+00:00").identified:
+            counters["boundary_grading_misses"] += 1
+        for bad_ttl in (0, MAX_TTL_SECONDS + 1):
+            try:
+                service.issue_token(
+                    "Boundary Op", "operator", ["facts:read"],
+                    ttl_seconds=bad_ttl)
+                counters["boundary_grading_misses"] += 1
+            except ValueError:
+                pass
+        try:
+            service.issue_token(
+                "Boundary Op", "operator", ["facts:read"],
+                ttl_seconds=MAX_TTL_SECONDS)
+        except ValueError:
+            counters["boundary_grading_misses"] += 1
+
+        # Connector lag: the books contract's stated 45-day
+        # bound — an envelope as-of exactly 45 days after its
+        # newest record conforms; one day further is stale
+        # and quarantined whole.
+        lag_at = _probe_envelope([_probe_record(
+            "expense:Probe Co:2025-06-14:45.00", "45.00")])
+        lag_at["as_of"] = "2025-07-29"
+        lag_report = exchange_port.exchange(lag_at)
+        if (lag_report.status != "accepted"
+                or lag_report.accepted != 1):
+            counters["boundary_grading_misses"] += 1
+        lag_over = _probe_envelope([_probe_record(
+            "expense:Probe Co:2025-06-14:46.00", "46.00")])
+        lag_over["as_of"] = "2025-07-30"
+        facts_before_lag = exchange_store.count_facts()
+        lag_over_report = exchange_port.exchange(lag_over)
+        if (lag_over_report.status != "quarantined"
+                or "stale_as_of" not in {
+                    v.code for v in lag_over_report.violations}
+                or exchange_store.count_facts()
+                != facts_before_lag):
+            counters["boundary_grading_misses"] += 1
+
+        # Digest periods: the daily digest's stated period is
+        # the head ledger's as-of day itself; the weekly's is
+        # the seven days ending that day.
+        for digest in gate_digests:
+            period = digest.payload["period"]
+            if digest.payload["cadence"] == "daily" and period != {
+                    "start": "2026-01-04", "end": "2026-01-04"}:
+                counters["boundary_grading_misses"] += 1
+            if digest.payload["cadence"] == "weekly" and period != {
+                    "start": "2025-12-29", "end": "2026-01-04"}:
+                counters["boundary_grading_misses"] += 1
+
+        # The tamper sweep: every artefact family the walk
+        # produces, one figure or field altered on a copy, and
+        # the family's verifier must refuse it with a named
+        # problem. Per-family results print as they grade; a
+        # family whose tamper passes counts a sweep miss.
+        def _tampered_copy(artefact, mutate):
+            payload = copy.deepcopy(artefact.payload)
+            mutate(payload)
+            return Artefact(
+                artefact_id=artefact.artefact_id,
+                kind=artefact.kind, payload=payload,
+                input_fingerprint=artefact.input_fingerprint)
+
+        def _sweep(family, problems):
+            if problems:
+                print(f"  tamper[{family}]: caught"
+                      f" ({len(problems)} problem(s))")
+            else:
+                print(f"  tamper[{family}]: MISSED")
+                counters["tamper_sweep_misses"] += 1
+
+        _sweep("ledger", service.ledger.verify(_tampered_copy(
+            artefact,
+            lambda p: p.__setitem__("gross_revenue", "1.00"))))
+        _sweep("diagnosis_stockout", service.diagnosis.verify(
+            _tampered_copy(
+                stockout, lambda p: p["findings"][0].__setitem__(
+                    "cover_days", "99.99"))))
+        _sweep("diagnosis_ad_decay", service.diagnosis.verify(
+            _tampered_copy(
+                decay, lambda p: p["findings"][0].__setitem__(
+                    "latest_week_roas", "9.9999"))))
+        _sweep("diagnosis_expense_anomaly",
+               service.diagnosis.verify(_tampered_copy(
+                   expenses, lambda p: p["findings"][0].__setitem__(
+                       "amount", "350.00"))))
+        _sweep("diagnosis_refund_anomaly",
+               service.diagnosis.verify(_tampered_copy(
+                   refund_anomalies,
+                   lambda p: p["findings"][0].__setitem__(
+                       "refunds", "1.00"))))
+        _sweep("diagnosis_email_flow_audit",
+               service.diagnosis.verify(_tampered_copy(
+                   dataset_audit,
+                   lambda p: p["findings"][0].__setitem__(
+                       "expected_steps", 99))))
+        _sweep("draft_flow_proposal", service.diagnosis.verify(
+            _tampered_copy(
+                dataset_proposals[0],
+                lambda p: p.__setitem__("steps", 99))))
+        listing_tampered = copy.deepcopy(listing.payload)
+        for finding in listing_tampered["findings"]:
+            if finding["class"] == "below_min_dimensions":
+                finding["width"] = 4000
+        _sweep("diagnosis_listing_quality", img.listing.verify(
+            Artefact(artefact_id=listing.artefact_id,
+                     kind=listing.kind, payload=listing_tampered,
+                     input_fingerprint=listing.input_fingerprint)))
+        _sweep("growth_plan", service.plan.verify(_tampered_copy(
+            plan, lambda p: p["summary"]["figures"][0].__setitem__(
+                "value", "1.00"))))
+        for draft_key, family in (
+                ("plan_narrative", "draft_plan_narrative"),
+                ("winback_email_copy", "draft_email_copy"),
+                ("ad_budget_note", "draft_ad_note")):
+            _sweep(family, service.drafting.verify(_tampered_copy(
+                drafts[draft_key],
+                lambda p: p["claims"][0].__setitem__(
+                    "value", "999999.99"))))
+        _sweep("guardian_verdict", service.guardian.verify(
+            _tampered_copy(
+                verdicts[drafts["plan_narrative"].artefact_id],
+                lambda p: p.__setitem__(
+                    "draft_content_hash", "0" * 64))))
+        _sweep("approval_act", service.approvals.verify(
+            _tampered_copy(
+                approval_acts[drafts["plan_narrative"].artefact_id],
+                lambda p: p.__setitem__(
+                    "draft_content_hash", "0" * 64))))
+        _sweep("morning_board", service.board.verify(
+            _tampered_copy(
+                board, lambda p: p["headline"]["figures"][0]
+                .__setitem__("value", "1.00"))))
+        _sweep("connector_quarantine", exchange_port.verify(
+            _tampered_copy(
+                quarantined.quarantine,
+                lambda p: p.__setitem__("record_count", 999))))
+        context_payload = copy.deepcopy(records[0].payload)
+        context_payload["tokens_after"] += 1
+        _sweep("context_assembly",
+               verify_context_payload(context_payload))
+        _sweep("ops_digest", access_svc.digests.verify(
+            _tampered_copy(
+                gate_digests[0],
+                lambda p: p["headline"]["figures"][0].__setitem__(
+                    "value", "1.00"))))
+        _sweep("review_pack", service.review_packs.verify(
+            _tampered_copy(
+                pack, lambda p: p["headline"]["figures"][0]
+                .__setitem__("value", "1.00"))))
+        _sweep("review_pack_export",
+               service.review_packs.verify_export(_tampered_copy(
+                   pack_export, lambda p: p.__setitem__(
+                       "body_checksum", "0" * 64))))
+        genuine_act = next(
+            a for a in service.store.list_artefacts(
+                "review_pack_publication")
+            if a.payload["pack_content_hash"] != "0" * 64)
+        _sweep("review_pack_publication",
+               service.review_packs.verify_publication(
+                   _tampered_copy(
+                       genuine_act, lambda p: p.__setitem__(
+                           "pack_content_hash", "0" * 64))))
+        # The delivery family verifies from the store, so its
+        # tamper lands behind the store's back: a recorded
+        # delivery whose signature is replaced must no longer
+        # re-perform.
+        delivery_art = service.store.list_artefacts(
+            "webhook_delivery")[0]
+        delivery_payload = dict(delivery_art.payload)
+        delivery_payload["signature"] = "sha256=" + "0" * 64
+        service.store._conn.execute(
+            "UPDATE artefacts SET payload = ?"
+            " WHERE artefact_id = ?",
+            (canonical_json(delivery_payload),
+             delivery_art.artefact_id))
+        service.store._conn.commit()
+        _sweep("webhook_delivery",
+               ["signature_no_longer_verifies"]
+               if service.webhooks.verify_delivery(
+                   delivery_payload["delivery_id"]) is False
+               else [])
+
+        # Promoted from the test suite: the ingest port's own
+        # idempotence — an identical fact re-presented is a
+        # duplicate that lands nothing twice, and the same
+        # natural key carrying different content is a refused
+        # conflict. (The connector layer's replay is graded in
+        # its own section above; this is the plain port.)
+        idem_item = {
+            "kind": "expense", "natural_key": "idem:1",
+            "payload": {"vendor": "Idem Co", "date": "2026-01-02",
+                        "category": "ops", "amount": "10.00"},
+            "source_system": "hartwell-books",
+            "as_of": "2026-01-02"}
+        if bnd_port.ingest(**idem_item).status != "accepted":
+            counters["ingest_idempotence_failures"] += 1
+        facts_after_first = bnd_store.count_facts()
+        if (bnd_port.ingest(**idem_item).status != "duplicate"
+                or bnd_store.count_facts() != facts_after_first):
+            counters["ingest_idempotence_failures"] += 1
+        conflict_item = copy.deepcopy(idem_item)
+        conflict_item["payload"]["amount"] = "11.00"
+        conflict_outcome = bnd_port.ingest(**conflict_item)
+        if (conflict_outcome.status != "refused"
+                or conflict_outcome.reason != "conflict"
+                or bnd_store.count_facts() != facts_after_first):
+            counters["ingest_idempotence_failures"] += 1
+
+        # Promoted from the test suite: webhook delivery under
+        # a failing receiver retries to the stated bound —
+        # three attempts, each recorded as its own artefact —
+        # and never fails the firing operation; and an
+        # unsubscribed subscription receives nothing further.
+        class FailingReceiver:
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self, url, body, headers):
+                self.calls += 1
+                return 500
+
+        service.webhooks.deliver = FailingReceiver()
+        retry_sub, _shown_secret = service.subscribe_webhook(
+            "https://hooks.example.invalid/retries",
+            ["review_pack_published"],
+            signing_secret="retry-probe-secret")
+        retry_sub_id = retry_sub.payload["subscription_id"]
+        pack_three = service.generate_review_pack("2026-03")
+        service.publish_review_pack(
+            pack_three.artefact_id, "Eval Owner")
+        retry_attempts = service.read_webhook_deliveries(
+            retry_sub_id)
+        if len(retry_attempts) != 3:
+            counters["webhook_retry_overruns"] += 1
+        if any(d["outcome"] == "delivered" for d in retry_attempts):
+            counters["webhook_retry_overruns"] += 1
+        service.unsubscribe_webhook(retry_sub_id)
+        pack_four = service.generate_review_pack("2026-04")
+        service.publish_review_pack(
+            pack_four.artefact_id, "Eval Owner")
+        if len(service.read_webhook_deliveries(
+                retry_sub_id)) != len(retry_attempts):
+            counters["unsubscribed_deliveries_made"] += 1
+
+        # Promoted from the test suite: the digest
+        # subscription fold — an unsubscribed (actor, role,
+        # cadence) generates no digest, and resubscribing
+        # revives generation.
+        fold_svc = _r19_service("digest-fold")
+        fold_svc.generate_dataset()
+        fold_svc.ledger.compute()
+        fold_svc.subscribe_digest("Solo Owner", "owner", "daily")
+        fold_svc.unsubscribe_digest("Solo Owner", "owner", "daily")
+        fold_svc.generate_digests("daily")
+        if fold_svc.store.list_artefacts(DIGEST_KIND):
+            counters["unsubscribed_digests_generated"] += 1
+        fold_svc.subscribe_digest("Solo Owner", "owner", "daily")
+        fold_svc.generate_digests("daily")
+        if len(fold_svc.store.list_artefacts(DIGEST_KIND)) != 1:
+            counters["unsubscribed_digests_generated"] += 1
+
+        # A negative fixture at the API layer, completing the
+        # port and service grading above: a contract-violating
+        # batch posted by the owner is a 422 naming the
+        # quarantine artefact, and nothing is ingested.
+        api_broken = copy.deepcopy(generator.build_batches()[1])
+        api_broken["contract_version"] = "1999.1.1"
+        facts_before_api = access_svc.store.count_facts()
+        api_resp = gate_client.post(
+            "/connectors/exchange", json={"envelope": api_broken},
+            headers={"X-SMB-Actor": "Maya Chen",
+                     "X-SMB-Role": "owner"})
+        api_detail = (api_resp.json().get("detail")
+                      if api_resp.status_code == 422 else {})
+        if (api_resp.status_code != 422
+                or not str(api_detail.get(
+                    "quarantine_artefact_id", "")).startswith(
+                        "QAR-")
+                or not api_detail.get("violations")
+                or access_svc.store.count_facts()
+                != facts_before_api):
+            counters["conformance_misses"] += 1
 
         # Cost analytics (Round 12): the summary over the gate's
         # own ledger must equal a hand sum over the recorded
