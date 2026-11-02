@@ -13,7 +13,7 @@ vendor systems (local doubles)          the agent loop (LangGraph)
                               model port (governed) ◄─────┘
                                 offline │ meta-muse          │
                                 cost ledger (per run)        ▼
-                                          diagnose (R2) ─► later rounds: draft
+                                          diagnose (R2) ─► draft
                                           ─► guardian screen ─► approval queue
                                           ─► morning board (a read, not a step)
 ```
@@ -49,8 +49,8 @@ service enforces it the same way for all of them.
   smoke (`scripts/prod_smoke.py`, `make smoke`: fresh schema,
   idempotent second boot, `/health` + `/readiness`, the walk, and a
   byte-identical diff against a full SQLite walk) both call it, so
-  the two grades can never drift apart. Round 10's verdict on the
-  builder's run: parity gap 0.
+  the two grades can never drift apart. The walk's graded
+  verdict is parity gap 0.
 - **Migrations** (`migrations/`): numbered SQL files per dialect,
   applied in order at startup by `migrations.py` and recorded in
   `schema_migrations`. Comments never contain a semicolon (the runner
@@ -392,7 +392,8 @@ service enforces it the same way for all of them.
 - **Object store port** (`objectstore.py`): filesystem by default,
   S3-compatible adapter when `SMB_S3_ENDPOINT` is set; the adapter
   fails closed on incomplete configuration. Round 1 wires the port;
-  the Round 17 review-pack exports store their bytes through it.
+  the Round 16 product images and the Round 17 review-pack exports
+  store their bytes through it.
 - **Graph** (`graph.py`): a LangGraph `StateGraph` whose nodes pass
   counts and artefact ids, never figures. Round 2 inserted the
   diagnose node between compute and verify; Round 4 extended it to
@@ -400,11 +401,14 @@ service enforces it the same way for all of them.
   inserted the plan node between diagnose and verify, and the
   verify node re-performs the plan alongside the ledger and the
   finding sets; Round 6 inserted the draft node between plan and
-  verify, and the verify node re-performs the drafts too; later
-  rounds insert nodes between `verify` and `END` without
-  changing the spine. Round 7 inserted the screen node between
-  draft and verify, and the verify node re-performs the guardian
-  verdicts alongside everything else. Round 9 adds no node: the
+  verify, and the verify node re-performs the drafts too. Round 7
+  inserted the screen node between draft and verify, and the
+  verify node re-performs the guardian verdicts alongside
+  everything else. The shipped spine is ingest -> ledger ->
+  diagnose -> plan -> draft -> screen -> verify, and no round
+  after Round 7 added a node: the Postgres profile, access,
+  digests, review packs, tokens and webhooks live in the store,
+  the service and the reads, not in the loop. Round 9 adds no node: the
   morning board is composed at read time from the record the
   loop leaves behind, like the approval queue's fold — a board
   node would imply the board is a pipeline product, and it is
@@ -552,4 +556,5 @@ R10 Postgres profile + prod smoke, R11 connector contracts v2, R12
 live Muse verification + context discipline, R13 access control +
 existence hiding, R14 digests, R15 red team, R16 multimodal listing
 checks, R17 monthly financial review pack, R18 webhooks + scoped
-tokens, R19 eval depth, R20 release hardening.
+tokens, R19 eval depth, R20 release hardening. All twenty rounds
+are built; this document describes the shipped v1.0.0 state.
