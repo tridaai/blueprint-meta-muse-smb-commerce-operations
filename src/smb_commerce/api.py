@@ -76,6 +76,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from . import __version__
 from .access import AccessRefused, Caller, resolve_caller
 from .approvals import APPROVAL_KIND, REJECTION_KIND, ApprovalRefused
 from .config import load_settings
@@ -133,7 +134,8 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="SMB Commerce Operations Agent", lifespan=lifespan)
+app = FastAPI(title="SMB Commerce Operations Agent", version=__version__,
+              lifespan=lifespan)
 
 
 @app.middleware("http")
